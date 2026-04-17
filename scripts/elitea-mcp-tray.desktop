@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=EliteA MCP Tray
+Comment=EliteA MCP Client System Tray Application
+Exec=elitea-mcp tray
+Icon=elitea-mcp
+Terminal=false
+Type=Application
+Categories=Utility;
+StartupNotify=true
+X-GNOME-Autostart-enabled=true

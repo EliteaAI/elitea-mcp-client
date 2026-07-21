@@ -19,7 +19,7 @@ class Agents():
                  api_extra_headers: Optional[dict] = None,
                  **kwargs):
         self.base_url = base_url.rstrip('/')
-        self.api_path = '/api/v1'
+        self.api_path = '/api/v2'
         self.project_id = project_id
         self.auth_token = auth_token
         self.headers = {
@@ -28,20 +28,15 @@ class Agents():
         self.api_extra_headers = api_extra_headers
         if api_extra_headers is not None:
             self.headers.update(api_extra_headers)
-        self.get_tags = f"{self.base_url}{self.api_path}/promptlib_shared/tags/prompt_lib/"
-        self.get_tags_1_6 = f"{self.base_url}{self.api_path}/prompt_lib/tags/prompt_lib/"
-        self.apps_list_url = f"{self.base_url}{self.api_path}/applications/applications/prompt_lib/"
-        self.app_versions_list = f"{self.base_url}{self.api_path}/applications/versions/prompt_lib/"
+        self.get_tags = f"{self.base_url}{self.api_path}/elitea_core/tags/prompt_lib/"
+        self.apps_list_url = f"{self.base_url}{self.api_path}/elitea_core/applications/prompt_lib/"
+        self.app_versions_list = f"{self.base_url}{self.api_path}/elitea_core/versions/prompt_lib/"
         self.agents = []
         self._get_list_of_apps()
 
     def _mcp_tag_id(self) -> List[str]:
         url = f"{self.get_tags}{self.project_id}?entity_coverage=all"
         response = requests.get(url, headers=self.headers, verify=False)
-        if response.status_code == 404:
-            # backward compatibility for versions < 1.7
-            url = f"{self.get_tags_1_6}{self.project_id}?entity_coverage=all"
-            response = requests.get(url, headers=self.headers, verify=False)
         if response.status_code != 200:
             raise ApiDetailsRequestError(f"Failed to fetch agent details: {response.text}")
         for tag in response.json().get("rows", []):
@@ -99,7 +94,7 @@ class Agent():
                  **kwargs):
 
         self.base_url = base_url.rstrip('/')
-        self.api_path = '/api/v1'
+        self.api_path = '/api/v2'
         self.project_id = project_id
         self.version_id = version_id
         self.application_id = app_id
@@ -110,9 +105,9 @@ class Agent():
         if api_extra_headers is not None:
             self.headers.update(api_extra_headers)
         
-        self.app_predict_url = f"{self.base_url}{self.api_path}/applications/predict/prompt_lib/"
-        self.app_details = f"{self.base_url}{self.api_path}/applications/application/prompt_lib/"
-        self.application_versions = f"{self.base_url}{self.api_path}/applications/version/prompt_lib/"
+        self.app_predict_url = f"{self.base_url}{self.api_path}/elitea_core/predict/prompt_lib/"
+        self.app_details = f"{self.base_url}{self.api_path}/elitea_core/application/prompt_lib/"
+        self.application_versions = f"{self.base_url}{self.api_path}/elitea_core/version/prompt_lib/"
         self.agent_name = None
         self.description = None
         self.pydantic_model = None

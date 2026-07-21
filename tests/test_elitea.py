@@ -100,8 +100,8 @@ class TestAgent:
         assert agent.pydantic_model is not None
         
         # Check URLs are constructed correctly
-        assert agent.app_predict_url == "http://example.com/api/v1/applications/predict/prompt_lib/"
-        assert agent.app_details == "http://example.com/api/v1/applications/application/prompt_lib/"
+        assert agent.app_predict_url == "http://example.com/api/v2/elitea_core/predict/prompt_lib/"
+        assert agent.app_details == "http://example.com/api/v2/elitea_core/application/prompt_lib/"
         
         # Check headers are set correctly
         assert "Authorization" in agent.headers
@@ -177,7 +177,7 @@ class TestAgent:
         """Test the predict method."""
         # Create a minimal Agent instance
         agent = Agent.__new__(Agent)
-        agent.app_predict_url = "http://example.com/api/v1/applications/predict/prompt_lib/"
+        agent.app_predict_url = "http://example.com/api/v2/elitea_core/predict/prompt_lib/"
         agent.project_id = 123
         agent.version_id = 789
         agent.headers = {"Authorization": "Bearer test_token"}
@@ -206,9 +206,8 @@ class TestAgent:
         call_args = mock_post.call_args
         payload = call_args[1]["json"]
         assert "chat_history" in payload
-        assert len(payload["chat_history"]) == 1
-        assert payload["chat_history"][0]["role"] == "user"
-        assert payload["chat_history"][0]["content"] == "Hello"
+        assert len(payload["chat_history"]) == 0  # No chat history provided, so empty
+        assert payload["user_input"] == "Hello"  # user_input is added separately
         
         assert "variables" in payload
         assert len(payload["variables"]) == 1
@@ -219,7 +218,7 @@ class TestAgent:
     def test_agent_predict_with_chat_history(self, mock_post):
         """Test predict method with chat history."""
         agent = Agent.__new__(Agent)
-        agent.app_predict_url = "http://example.com/api/v1/applications/predict/prompt_lib/"
+        agent.app_predict_url = "http://example.com/api/v2/elitea_core/predict/prompt_lib/"
         agent.project_id = 123
         agent.version_id = 789
         agent.headers = {"Authorization": "Bearer test_token"}
@@ -247,16 +246,16 @@ class TestAgent:
         
         assert result == {"result": "success"}
         payload = mock_post.call_args[1]["json"]
-        assert len(payload["chat_history"]) == 3
+        assert len(payload["chat_history"]) == 2  # Only the provided chat_history items
         assert payload["chat_history"][0]["content"] == "Previous message"
         assert payload["chat_history"][1]["content"] == "Previous response"
-        assert payload["chat_history"][2]["content"] == "New message"
+        assert payload["user_input"] == "New message"  # user_input is separate
     
     @patch("requests.post")
     def test_agent_predict_with_invalid_field(self, mock_post):
         """Test predict method with invalid field in kwargs."""
         agent = Agent.__new__(Agent)
-        agent.app_predict_url = "http://example.com/api/v1/applications/predict/prompt_lib/"
+        agent.app_predict_url = "http://example.com/api/v2/elitea_core/predict/prompt_lib/"
         agent.project_id = 123
         agent.version_id = 789
         agent.headers = {"Authorization": "Bearer test_token"}
@@ -289,7 +288,7 @@ class TestAgent:
     def test_agent_predict_error(self, mock_post):
         """Test error handling in predict method."""
         agent = Agent.__new__(Agent)
-        agent.app_predict_url = "http://example.com/api/v1/applications/predict/prompt_lib/"
+        agent.app_predict_url = "http://example.com/api/v2/elitea_core/predict/prompt_lib/"
         agent.project_id = 123
         agent.version_id = 789
         agent.headers = {"Authorization": "Bearer test_token"}
@@ -383,8 +382,8 @@ class TestAgents:
         )
         
         # Check that URLs were constructed correctly
-        assert agents.get_tags == "http://example.com/api/v1/prompt_lib/tags/prompt_lib/"
-        assert agents.apps_list_url == "http://example.com/api/v1/applications/applications/prompt_lib/"
+        assert agents.get_tags == "http://example.com/api/v2/elitea_core/tags/prompt_lib/"
+        assert agents.apps_list_url == "http://example.com/api/v2/elitea_core/applications/prompt_lib/"
         
         # Check that agents were created (note: Agents class creates Agent instances internally)
         assert len(agents.agents) == 2  # Two apps in our mock response
@@ -464,8 +463,8 @@ class TestAgents:
         )
         
         # Check that URLs were constructed correctly
-        assert agents.get_tags == "http://example.com/api/v1/prompt_lib/tags/prompt_lib/"
-        assert agents.apps_list_url == "http://example.com/api/v1/applications/applications/prompt_lib/"
+        assert agents.get_tags == "http://example.com/api/v2/elitea_core/tags/prompt_lib/"
+        assert agents.apps_list_url == "http://example.com/api/v2/elitea_core/applications/prompt_lib/"
         
         # Check that agents were created (note: Agents class creates Agent instances internally)
         assert len(agents.agents) == 2  # Two apps in our mock response
@@ -477,10 +476,10 @@ class TestAgents:
         
         agents = Agents.__new__(Agents)
         agents.base_url = "http://example.com"
-        agents.api_path = "/api/v1"
+        agents.api_path = "/api/v2"
         agents.project_id = 123
         agents.headers = {"Authorization": "Bearer test_token"}
-        agents.get_tags = "http://example.com/api/v1/prompt_lib/tags/prompt_lib/"
+        agents.get_tags = "http://example.com/api/v2/elitea_core/tags/prompt_lib/"
         
         tag_id = agents._mcp_tag_id()
         assert tag_id == "tag1"
@@ -500,10 +499,10 @@ class TestAgents:
         
         agents = Agents.__new__(Agents)
         agents.base_url = "http://example.com"
-        agents.api_path = "/api/v1"
+        agents.api_path = "/api/v2"
         agents.project_id = 123
         agents.headers = {"Authorization": "Bearer test_token"}
-        agents.get_tags = "http://example.com/api/v1/prompt_lib/tags/prompt_lib/"
+        agents.get_tags = "http://example.com/api/v2/elitea_core/tags/prompt_lib/"
         
         with pytest.raises(ApiDetailsRequestError, match="Failed to fetch agent details"):
             agents._mcp_tag_id()
@@ -518,14 +517,14 @@ class TestAgents:
         
         agents = Agents.__new__(Agents)
         agents.base_url = "http://example.com"
-        agents.api_path = "/api/v1"
+        agents.api_path = "/api/v2"
         agents.project_id = 123
         agents.headers = {"Authorization": "Bearer test_token"}
-        agents.get_tags = "http://example.com/api/v1/prompt_lib/tags/prompt_lib/"
+        agents.get_tags = "http://example.com/api/v2/elitea_core/tags/prompt_lib/"
         
-        # Should return the first tag if no 'mcp' tag found
+        # Should return None if no 'mcp' tag found
         result = agents._mcp_tag_id()
-        assert result == {"id": "tag1", "name": "not-mcp"}
+        assert result is None
     
     @patch("requests.get")
     def test_get_app_version_id_with_latest(self, mock_get):
@@ -541,7 +540,7 @@ class TestAgents:
         
         agents = Agents.__new__(Agents)
         agents.headers = {"Authorization": "Bearer test_token"}
-        agents.app_versions_list = "http://example.com/api/v1/applications/versions/prompt_lib/"
+        agents.app_versions_list = "http://example.com/api/v2/elitea_core/versions/prompt_lib/"
         agents.project_id = 123
         
         version_id = agents._get_app_version_id("app1")
@@ -561,7 +560,7 @@ class TestAgents:
         
         agents = Agents.__new__(Agents)
         agents.headers = {"Authorization": "Bearer test_token"}
-        agents.app_versions_list = "http://example.com/api/v1/applications/versions/prompt_lib/"
+        agents.app_versions_list = "http://example.com/api/v2/elitea_core/versions/prompt_lib/"
         agents.project_id = 123
         
         version_id = agents._get_app_version_id("app1")
@@ -578,7 +577,7 @@ class TestAgents:
         
         agents = Agents.__new__(Agents)
         agents.headers = {"Authorization": "Bearer test_token"}
-        agents.app_versions_list = "http://example.com/api/v1/applications/versions/prompt_lib/"
+        agents.app_versions_list = "http://example.com/api/v2/elitea_core/versions/prompt_lib/"
         agents.project_id = 123
         
         with pytest.raises(ApiDetailsRequestError, match="Failed to fetch agent details"):
@@ -594,7 +593,7 @@ class TestAgents:
         
         agents = Agents.__new__(Agents)
         agents.headers = {"Authorization": "Bearer test_token"}
-        agents.app_versions_list = "http://example.com/api/v1/applications/versions/prompt_lib/"
+        agents.app_versions_list = "http://example.com/api/v2/elitea_core/versions/prompt_lib/"
         agents.project_id = 123
         
         with pytest.raises(ApiDetailsRequestError, match="Failed to fetch agent details"):
@@ -629,7 +628,7 @@ class TestAgents:
         agents.project_id = 123
         agents.auth_token = "test_token"
         agents.api_extra_headers = None
-        agents.apps_list_url = "http://example.com/api/v1/applications/applications/prompt_lib/"
+        agents.apps_list_url = "http://example.com/api/v2/elitea_core/applications/prompt_lib/"
         agents.headers = {"Authorization": "Bearer test_token"}
         agents.agents = []
         
@@ -669,7 +668,7 @@ class TestAgents:
         mock_get.return_value = mock_response
         
         agents = Agents.__new__(Agents)
-        agents.apps_list_url = "http://example.com/api/v1/applications/applications/prompt_lib/"
+        agents.apps_list_url = "http://example.com/api/v2/elitea_core/applications/prompt_lib/"
         agents.project_id = 123
         agents.headers = {"Authorization": "Bearer test_token"}
         

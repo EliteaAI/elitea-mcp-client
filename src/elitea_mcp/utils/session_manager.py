@@ -1,7 +1,7 @@
 import asyncio
 import atexit
 import threading
-from typing import Dict, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple, Any, Union
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
@@ -9,6 +9,7 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
 from ..config import load_config
+from .tool_result import render_tool_result
 
 
 class SessionManager:
@@ -65,7 +66,7 @@ class SessionManager:
         """Synchronous wrapper for cleanup_session."""
         return self._run_in_loop(self.cleanup_session(server_name))
     
-    def call_tool_with_recovery_sync(self, server_name: str, server_conf: dict, params: dict) -> str:
+    def call_tool_with_recovery_sync(self, server_name: str, server_conf: dict, params: dict) -> Union[str, dict]:
         """Synchronous wrapper for call_tool_with_recovery."""
         return self._run_in_loop(self.call_tool_with_recovery(server_name, server_conf, params))
 
@@ -207,14 +208,14 @@ class SessionManager:
         await self.cleanup_session(server_name)
         return await self.get_session(server_name, server_conf)
     
-    async def call_tool_with_recovery(self, server_name: str, server_conf: dict, params: dict) -> str:
+    async def call_tool_with_recovery(self, server_name: str, server_conf: dict, params: dict) -> Union[str, dict]:
         """Call a tool with automatic session recovery on failure."""
         max_retries = 2
         for attempt in range(max_retries):
             try:
                 session = await self.get_session(server_name, server_conf)
                 tool_result = await session.call_tool(params["name"], params["arguments"])
-                return tool_result.content[0].text
+                return render_tool_result(tool_result)
             except Exception as e:
                 print(f"Error calling tool on attempt {attempt + 1}: {e}")
                 if attempt < max_retries - 1:

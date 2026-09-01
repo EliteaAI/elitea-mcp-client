@@ -11,6 +11,7 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
 from .session_manager import get_session_manager
+from .tool_result import render_tool_result
 
 
 def _sanitize_server_tools(all_tools: Any) -> List[Dict[str, Any]]:
@@ -271,18 +272,18 @@ async def _mcp_tools_call(server_conf, params, server_name=None):
             ) as session:
                 await session.initialize()
                 tool_result = await session.call_tool(params["name"], params["arguments"])
-                return tool_result.content[0].text
+                return render_tool_result(tool_result)
 
     elif server_conf["type"].lower() == "http":
         async with streamablehttp_client(server_conf["url"], server_conf["headers"]) as (read_stream, write_stream, _):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
                 tool_result = await session.call_tool(params["name"], params["arguments"])
-                return tool_result.content[0].text
+                return render_tool_result(tool_result)
 
     elif server_conf["type"].lower() == "sse":
         async with sse_client(server_conf["url"], server_conf.get("headers", {})) as streams:
             async with ClientSession(*streams) as session:
                 await session.initialize()
                 tool_result = await session.call_tool(params["name"], params["arguments"])
-                return tool_result.content[0].text
+                return render_tool_result(tool_result)

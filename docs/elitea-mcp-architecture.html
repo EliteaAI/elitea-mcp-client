@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ELITEA MCP Architecture</title>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true, theme: 'default', securityLevel: 'loose', flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis' } });
+  </script>
+  <style>
+    :root { --navy:#17324d; --blue:#2563eb; --green:#15803d; --amber:#a16207; --border:#dbe3ec; --text:#1f2937; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--text); background:#f8fafc; font-family:Arial,Helvetica,sans-serif; line-height:1.55; }
+    header { color:#fff; background:linear-gradient(135deg,#17324d,#2563eb); padding:44px 7%; }
+    header h1 { margin:0 0 8px; font-size:2.2rem; } header p { margin:0; opacity:.9; }
+    main { max-width:1280px; margin:auto; padding:30px 24px 60px; }
+    section { background:#fff; border:1px solid var(--border); border-radius:12px; padding:24px; margin-bottom:24px; box-shadow:0 3px 12px rgba(15,23,42,.04); }
+    h2 { color:var(--navy); margin-top:0; border-bottom:2px solid #e5e7eb; padding-bottom:8px; }
+    h3 { color:var(--navy); margin-top:24px; }
+    .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:16px; }
+    .card { border:1px solid var(--border); border-left:5px solid var(--blue); border-radius:8px; padding:16px; background:#eff6ff; }
+    .card.green { border-left-color:var(--green); background:#f0fdf4; } .card.amber { border-left-color:var(--amber); background:#fffbeb; }
+    .diagram { overflow-x:auto; padding:12px 0; } .note { border-left:4px solid var(--amber); background:#fffbeb; padding:12px 16px; margin:16px 0; }
+    table { width:100%; border-collapse:collapse; margin:16px 0; font-size:.95rem; } th,td { border:1px solid var(--border); padding:10px 12px; text-align:left; vertical-align:top; } th { color:#fff; background:var(--navy); } tr:nth-child(even) { background:#f8fafc; }
+    code { color:#0f3d70; background:#eef2ff; border-radius:4px; padding:2px 5px; font-family:Consolas,monospace; font-size:.9em; } pre { overflow-x:auto; color:#e5e7eb; background:#0f172a; border-radius:8px; padding:16px; }
+    .confirmed { color:var(--green); font-weight:bold; } .inferred { color:var(--amber); font-weight:bold; } .unknown { color:#b91c1c; font-weight:bold; }
+    footer { color:#64748b; font-size:.9rem; text-align:center; padding:24px; }
+    @media print { body { background:#fff; } section { box-shadow:none; break-inside:avoid; } header { color:#000; background:#fff; border-bottom:2px solid var(--navy); } header p { opacity:1; } }
+  </style>
+</head>
+<body>
+<header><h1>ELITEA MCP Architecture</h1><p>MCP client/server integration, external MCP sources, ELITEA APIs, and configuration services</p></header>
+<main>
+<section><h2>Executive Summary</h2><p>The ELITEA MCP repository is a protocol and integration layer. It connects MCP hosts and external MCP servers to ELITEA using MCP transports, REST, and Socket.IO.</p><div class="cards"><div class="card"><strong>MCP client/server</strong><p>Provides CLI, tray, daemon, agent discovery, invocation, and external MCP connectivity.</p></div><div class="card green"><strong>Local persistence</strong><p>Stores bootstrap and server settings in local <code>config.json</code>.</p></div><div class="card"><strong>ELITEA platform</strong><p>Provides application discovery, version metadata, prediction APIs, and Socket.IO MCP events.</p></div><div class="card amber"><strong>Configuration subsystem</strong><p>The server-side Configurations repository owns database-backed configuration services. MCP reaches it, if at all, indirectly through platform services.</p></div></div></section>
+<section><h2>Architecture Diagram</h2><div class="diagram"><pre class="mermaid">flowchart LR
+    Host[MCP Host / IDE / Client]
+    subgraph MCP["EliteaAI/elitea-mcp-client"]
+      Main["main.py<br/>CLI and runtime"]
+      Config["config.py<br/>Local configuration"]
+      Run["commands/run_servers.py<br/>Server startup"]
+      Agent["clients/elitea.py<br/>Agents / Agent"]
+      Server["server/mcp.py<br/>MCP handlers"]
+      SIO["utils/sio.py<br/>Socket.IO bridge"]
+      Sessions["utils/session_manager.py<br/>Stateful sessions"]
+      Controller["utils/server_controller.py<br/>Lifecycle"]
+    end
+    File[(Local config.json)]
+    External["External MCP Servers<br/>stdio / SSE / HTTP"]
+    REST["ELITEA REST APIs<br/>tags, apps, versions, predict"]
+    Socket["ELITEA Socket.IO<br/>mcp_connect, tools_list, tools_call"]
+    Runtime["ELITEA Agent / Application Runtime"]
+    subgraph CR["EliteaAI/configurations"]
+      API["Configuration REST/RPC APIs"]
+      Registry["Configuration type registry"]
+      DB[(Configuration database)]
+      Vault[(Vault / secrets)]
+    end
+    Host -->|MCP stdio / SSE| Server
+    Server -->|list_tools / call_tool| Agent
+    Main --> Config
+    Run --> Config
+    Config -->|read / write| File
+    Main --> Agent
+    Agent -->|HTTPS + Bearer token| REST
+    REST --> Runtime
+    Run --> Controller
+    Controller --> External
+    SIO --> Sessions
+    Sessions --> External
+    SIO -->|Socket.IO events| Socket
+    Socket --> SIO
+    Runtime -. configuration lookup .-> API
+    API --> Registry
+    API --> DB
+    API --> Vault
+    classDef confirmed fill:#dff3e4,stroke:#2e7d32,color:#111;
+    classDef indirect fill:#fff3cd,stroke:#a87900,color:#111;
+    class Main,Config,Run,Agent,Server,SIO,Sessions,Controller,File,External,REST,Socket,Runtime confirmed;
+    class API,Registry,DB,Vault indirect;</pre></div><div class="note"><strong>Evidence note:</strong> Solid relationships are supported by MCP repository code. The dashed relationship to the Configurations repository is indirect and requires deployment-level validation.</div></section>
+<section><h2>Connection Paths</h2><h3>1. MCP host to ELITEA agents</h3><pre>MCP Host → server/mcp.py → Agent.predict() → ELITEA prediction API → MCP TextContent</pre><p><strong>Evidence:</strong> <code>src/elitea_mcp/server/mcp.py</code>, <code>src/elitea_mcp/clients/elitea.py</code>, and <code>src/elitea_mcp/main.py</code>.</p><h3>2. MCP client to external MCP servers</h3><pre>config.json → commands/run_servers.py → server controller/session manager → external MCP server</pre><p>Supported transports include stdio, SSE, and streamable HTTP. Evidence: <code>src/elitea_mcp/commands/run_servers.py</code>, <code>src/elitea_mcp/utils/sio.py</code>, and <code>src/elitea_mcp/utils/session_manager.py</code>.</p><h3>3. MCP client to Socket.IO services</h3><p>The bridge handles <code>mcp_connect</code>, <code>mcp_tools_list</code>, <code>mcp_tools_call</code>, <code>mcp_notification</code>, and <code>mcp_ping</code>. Evidence: <code>src/elitea_mcp/utils/sio.py</code>.</p><h3>4. MCP client to local persistence</h3><p><code>config.py</code> stores deployment URL, token, project ID, server definitions, host, port, timeout, and SSL-related settings in a platform-specific <code>config.json</code>.</p></section>
+<section><h2>Component Responsibilities</h2><table><thead><tr><th>Component</th><th>Responsibility</th><th>Evidence</th></tr></thead><tbody><tr><td><code>main.py</code></td><td>CLI/runtime composition and startup</td><td><code>src/elitea_mcp/main.py</code></td></tr><tr><td><code>config.py</code></td><td>Local bootstrap and server configuration</td><td><code>src/elitea_mcp/config.py</code></td></tr><tr><td><code>clients/elitea.py</code></td><td>ELITEA application discovery and prediction</td><td><code>src/elitea_mcp/clients/elitea.py</code></td></tr><tr><td><code>server/mcp.py</code></td><td>MCP protocol server and tool handlers</td><td><code>src/elitea_mcp/server/mcp.py</code></td></tr><tr><td><code>utils/sio.py</code></td><td>Socket.IO integration and MCP tool routing</td><td><code>src/elitea_mcp/utils/sio.py</code></td></tr><tr><td><code>utils/session_manager.py</code></td><td>Stateful MCP sessions</td><td><code>src/elitea_mcp/utils/session_manager.py</code></td></tr><tr><td><code>utils/server_controller.py</code></td><td>External MCP server lifecycle</td><td><code>src/elitea_mcp/utils/server_controller.py</code></td></tr><tr><td><code>EliteaAI/configurations</code></td><td>Server-side configuration management and persistence</td><td><code>api/v2/</code>, <code>models/</code>, <code>rpc/</code></td></tr></tbody></table></section>
+<section><h2>Database and Configuration Boundaries</h2><table><thead><tr><th>Store/service</th><th>Owner</th><th>Purpose</th><th>Status</th></tr></thead><tbody><tr><td>Local <code>config.json</code></td><td>MCP client</td><td>Deployment, credentials, project, and MCP server settings</td><td class="confirmed">Confirmed</td></tr><tr><td>Configuration database</td><td>Configurations repository</td><td>Project-scoped configuration records</td><td class="confirmed">Confirmed in Config repository</td></tr><tr><td>Vault/secret storage</td><td>Server-side platform</td><td>Secret or credential handling</td><td class="inferred">Indirectly supported</td></tr><tr><td>ELITEA application runtime</td><td>ELITEA platform</td><td>Agent execution and prediction</td><td class="confirmed">MCP API dependency confirmed</td></tr></tbody></table><p>The MCP repository does not show a direct connection to PostgreSQL, SQLite, or another relational database. Its visible local persistence mechanism is the JSON configuration file.</p></section>
+<section><h2>Evidence Status and Open Questions</h2><h3 class="confirmed">Confirmed</h3><ul><li>MCP host connectivity through stdio and SSE.</li><li>ELITEA REST and Socket.IO integration.</li><li>External MCP connectivity through stdio, SSE, and HTTP.</li><li>Local <code>config.json</code> persistence.</li><li>MCP tool discovery and invocation.</li><li>Server-side configuration APIs and database-backed configuration models.</li></ul><h3 class="inferred">Indirect or inferred</h3><ul><li>The ELITEA agent runtime may resolve model/provider configuration through the Configurations subsystem.</li><li>MCP tool registrations may be persisted or managed by platform services outside the MCP repository.</li></ul><h3 class="unknown">Unresolved</h3><ol><li>Which ELITEA service implements the server side of Socket.IO MCP events?</li><li>Does the ELITEA prediction runtime always use <code>EliteaAI/configurations</code>?</li><li>Are MCP tool registrations stored in the configuration database or another platform store?</li><li>Which service backs each configuration endpoint used by other ELITEA clients?</li></ol></section>
+<section><h2>Source References</h2><ul><li><code>EliteaAI/elitea-mcp-client/src/elitea_mcp/main.py</code></li><li><code>EliteaAI/elitea-mcp-client/src/elitea_mcp/config.py</code></li><li><code>EliteaAI/elitea-mcp-client/src/elitea_mcp/clients/elitea.py</code></li><li><code>EliteaAI/elitea-mcp-client/src/elitea_mcp/server/mcp.py</code></li><li><code>EliteaAI/elitea-mcp-client/src/elitea_mcp/utils/sio.py</code></li><li><code>EliteaAI/elitea-mcp-client/src/elitea_mcp/utils/session_manager.py</code></li><li><code>EliteaAI/configurations/module.py</code></li><li><code>EliteaAI/configurations/api/v2/configurations.py</code></li><li><code>EliteaAI/configurations/models/configuration.py</code></li><li><code>EliteaAI/configurations/models/pd/registry.py</code></li></ul></section>
+</main><footer>Architecture generated from indexed repository and documentation evidence.</footer>
+</body>
+</html>

@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 license = "Apache-2.0"
 keywords = [ "client", "mcp", "elitea",]
 classifiers = [ "Development Status :: 4 - Beta", "Intended Audience :: Developers", "Programming Language :: Python :: 3", "Programming Language :: Python :: 3.10", "Programming Language :: Python :: 3.11", "Programming Language :: Python :: 3.12",]
-dependencies = [ "appdirs>=1.4.4", "requests~=2.32.3", "pytest~=8.3.5", "mcp==1.12.4", "pydantic>=2.0,<2.14", "python-dotenv>=1.0.0", "python-socketio[client]~=5.13.0", "websocket-client~=1.8.0", "pystray>=0.19.0", "pillow>=8.0.0", "pyobjc-framework-Cocoa>=8.0; sys_platform == 'darwin'",]
+dependencies = [ "appdirs>=1.4.4", "requests~=2.32.3", "pytest~=8.3.5", "mcp==1.30.0", "pydantic>=2.0,<2.14", "python-dotenv>=1.0.0", "python-socketio[client]~=5.13.0", "websocket-client~=1.8.0", "pystray>=0.19.0", "pillow>=8.0.0", "pyobjc-framework-Cocoa>=8.0; sys_platform == 'darwin'",]
 [[project.authors]]
 name = "Artem Rozumenko"
 email = "artyom.rozumenko@gmail.com"

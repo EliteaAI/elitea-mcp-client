@@ -1,5 +1,7 @@
+import socketserver
 import threading
 import time
+import wsgiref.simple_server
 from unittest.mock import call, patch, MagicMock
 
 import socketio
@@ -27,18 +29,27 @@ def create_socket_server(async_mode='threading'):
         disconnect_event.set()
         pass
 
+    @sio_server.event
+    def mcp_connect(sid, data):
+        pass
+
     return sio_server, app
 
 
+class ThreadingWSGIServer(socketserver.ThreadingMixIn, wsgiref.simple_server.WSGIServer):
+    daemon_threads = True
+
+
 def run_server():
-    import wsgiref.simple_server
     sio_server, app = create_socket_server()
-    server = wsgiref.simple_server.make_server('localhost', 5002, app)
+    server = wsgiref.simple_server.make_server('localhost', 5002, app, server_class=ThreadingWSGIServer)
     server.allow_reuse_address = True
     
     while not stop_event.is_set():
         server.handle_request()
     
+    for engineio_socket in list(sio_server.eio.sockets.values()):
+        engineio_socket.close(wait=False, abort=True)
     server.server_close()
 
 
@@ -58,12 +69,13 @@ def stop_server():
     stop_event.clear()
 
 
+@patch("src.elitea_mcp.utils.server_controller.validate_platform_config", side_effect=lambda config, notify: config)
 @patch("src.elitea_mcp.utils.server_controller.get_all_tools")
 @patch("src.elitea_mcp.utils.server_controller.load_config")
-def test_events_for_start_servers(mock_load_config, mock_get_all_tools):
+def test_events_for_start_servers(mock_load_config, mock_get_all_tools, mock_validate_platform_config):
     start_server()
     mock_load_config.return_value = {
-        "deployment_url": "http://localhost:5002", "auth_token": "any_token", "host": "0.0.0.0", "port": 8000, "servers": {"mcp_1": {"name": "mcp_server_1"}}, "project_id": 123
+        "deployment_url": "http://localhost:5002", "auth_token": "any_token", "host": "0.0.0.0", "port": 8000, "servers": {"mcp_1": {"name": "mcp_server_1"}}, "project_id": 123, "timeout": 30
     }
     mock_get_all_tools.return_value = [{
         'name': 'mcp_server_1', 'tools': [{'annotations': None, 'description': 'descr', 'inputSchema': {'properties': {'task': {}}, 'required': ['task'], 'type': 'object'}, 'meta': None, 'name': 'ant_te_st-__2345', 'outputSchema': None, 'title': None}]
@@ -99,23 +111,18 @@ def test_events_for_start_servers(mock_load_config, mock_get_all_tools):
     
     stop_server() # Stop the server to simulate disconnection or restart
 
-    wait_for_condition(lambda: mock_error_callback.call_count == 1) # Wait for exectly one error callback to be called due to disconnection
+    wait_for_condition(lambda: mock_status_callback.call_count == 5) # A dropped connection is reported as a status, not an error
 
-    expected_errors = [
-        call.__bool__(),
-        call("Disconnected from platform"),
-    ]
-    mock_error_callback.assert_has_calls(expected_errors)
-    mock_status_callback.assert_has_calls(expected_statuses)
-    assert mock_status_callback.call_count == 4
+    mock_status_callback.assert_called_with("Connection lost, reconnecting...")
+    mock_error_callback.assert_not_called()
     
     start_server() # Restart the server to simulate reconnection and verify socket client recovery
 
     connect_event.wait(timeout=interaction_timeout)  # Wait for client reconnected to server socket
-    wait_for_condition(lambda: mock_status_callback.call_count == 4)
+    wait_for_condition(lambda: mock_status_callback.call_count == 6)
     
-    mock_status_callback.assert_has_calls(expected_statuses) # ensure new reconnection status calls were made
-    assert mock_error_callback.call_count == 1 # ensure number of error calls remains the same
+    mock_status_callback.assert_called_with("Connected to platform") # Registration is repeated after the reconnect
+    mock_error_callback.assert_not_called()
     assert controller.is_running is True
 
 

@@ -24,7 +24,8 @@ if platform.system() == "Darwin":
         pass
 
 from ..config import load_config
-from ..utils.sio import start_socket_connection, get_all_tools
+from ..utils.preflight import PreflightError, validate_platform_config
+from ..utils.sio import PlatformConnectionError, start_socket_connection, get_all_tools
 
 SERVER_RESTART_DELAY = 2  # Delay before restarting servers to allow resources to release
 MONITOR_DELAY = 5  # Delay for monitoring daemon process status
@@ -167,8 +168,7 @@ class ServerController:
                 self.is_running = True
                 self._notify_status("Starting MCP servers...")
                 
-                # Get all tools from configured servers
-                config = load_config()
+                config = validate_platform_config(load_config(), self._notify_status)
                 servers = config.get("servers", {})
                 all_tools = asyncio.run(get_all_tools(servers))
                 
@@ -189,6 +189,8 @@ class ServerController:
                 
                 sio.disconnect()
                     
+            except (PreflightError, PlatformConnectionError) as error:
+                self._notify_error(str(error))
             except Exception as e:
                 self._notify_error(f"Server error: {str(e)}")
             finally:

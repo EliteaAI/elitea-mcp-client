@@ -10,8 +10,7 @@ import subprocess
 import platform
 import multiprocessing
 import logging
-
-from elitea_mcp.utils.package_updates import check_for_update
+import webbrowser
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +32,27 @@ from PIL import Image, ImageDraw
 from .config import get_bootstrap_config, set_bootstrap_config, interactive_bootstrap, get_config_file
 from .utils.server_controller import get_server_controller
 from .main import main, setup_file_logger, get_default_paths
+from .utils.package_updates import UpdateChecker, get_installed_version
+from .utils.self_update import consume_update_result, resolve_upgrade_plan, start_update_helper
+
+CLIPBOARD_COMMANDS = {
+    "darwin": [["pbcopy"]],
+    "windows": [["clip"]],
+    "linux": [["wl-copy"], ["xclip", "-selection", "clipboard"]],
+}
 
 
 class MCPTrayApp:
-    def __init__(self):
+    def __init__(self, tray_flags=None):
         self.icon = None
         self.server_controller = get_server_controller()
         self.is_server_running = False
+        self.tray_flags = tray_flags or []
+        config = get_bootstrap_config()
+        self.update_checker = (
+            UpdateChecker(self.on_update_state_change, config["update_check_interval_hours"])
+            if config["update_check"] else None
+        )
         
         # Set up callbacks for server controller
         self.server_controller.set_status_callback(self.on_server_status_change)
@@ -216,11 +229,15 @@ class MCPTrayApp:
             pystray.Menu.SEPARATOR
         ])
         
-        if latest_version := check_for_update():
-            menu_items.extend([
-                pystray.MenuItem(f"New Version Available: {latest_version}", self.update_package),
-                pystray.Menu.SEPARATOR,
-            ])
+        if self.update_checker:
+            update_state = self.update_checker.state
+            menu_items.append(pystray.MenuItem("Check for Updates", self.check_for_updates))
+            if update_state.can_update:
+                menu_items.extend([
+                    pystray.MenuItem(f"Update to {update_state.latest} and Restart", self.update_and_restart),
+                    pystray.MenuItem(f"Release Notes for {update_state.latest}", self.open_release_notes),
+                ])
+            menu_items.append(pystray.Menu.SEPARATOR)
         
         menu_items.extend([
             pystray.MenuItem("About", self.show_about),
@@ -229,10 +246,71 @@ class MCPTrayApp:
         
         return menu_items
 
-    def update_package(self):
-        """Update the app from PyPI using pip."""
-        self.show_notification("New Version Available", "New Version is available to update from PyPI")
-        
+    def on_update_state_change(self, state):
+        """Refresh the menu after a background check and announce a newly found release."""
+        self.update_menu()
+        if state.can_update:
+            self.show_notification("Update Available", f"{state.describe()}\nRelease notes: {state.release_notes_url}")
+
+    def check_for_updates(self, icon=None, item=None):
+        """Check PyPI on a worker thread so the menu stays responsive, then report the outcome."""
+        def check():
+            self.update_checker.refresh()
+            self.update_menu()
+            self.show_notification("Check for Updates", self.update_checker.state.describe())
+
+        threading.Thread(target=check, name="manual-update-check", daemon=True).start()
+
+    def open_release_notes(self, icon=None, item=None):
+        """Open the release page of the available version."""
+        webbrowser.open(self.update_checker.state.release_notes_url)
+
+    def update_and_restart(self, icon=None, item=None):
+        """Stop the servers and hand the upgrade to a detached helper, or show the command to run by hand."""
+        state = self.update_checker.state
+        plan = resolve_upgrade_plan()
+        if not plan.can_run:
+            clipboard_note = " (copied to clipboard)" if self._copy_to_clipboard(plan.display_command) else ""
+            self.show_notification("Update Manually", f"{plan.reason} Run: {plan.display_command}{clipboard_note}")
+            return
+        servers_were_running = self.is_server_running
+        server_daemon_mode = self.server_controller.daemon_mode
+        self.show_notification("Updating", f"Updating to {state.latest}. The tray will restart.")
+        self.stop_server()
+        try:
+            start_update_helper(plan, state.current, state.latest, self.tray_flags,
+                                servers_were_running, server_daemon_mode, get_default_paths())
+        except OSError as error:
+            self.show_error("Update Failed", f"Could not start the updater: {error}")
+            if servers_were_running:
+                self.start_server(daemon_mode=server_daemon_mode)
+            return
+        self.update_checker.stop()
+        if self.icon:
+            self.icon.stop()
+
+    def report_update_result(self):
+        """Tell the user how the last update went and bring back the servers it stopped."""
+        result = consume_update_result(get_default_paths()["update_result"])
+        if not result:
+            return
+        if result["error"]:
+            self.show_error("Update Failed", f"{result['error']}. See log: {result['log']}")
+        else:
+            self.show_notification("Update Complete", f"Updated to {result['installed']}.")
+        if result["servers_were_running"]:
+            self.start_server(daemon_mode=result["server_daemon_mode"])
+
+    def _copy_to_clipboard(self, text):
+        """Put text on the clipboard with the platform's own tool, reporting whether it worked."""
+        for command in CLIPBOARD_COMMANDS.get(platform.system().lower(), []):
+            try:
+                subprocess.run(command, input=text, text=True, check=True, timeout=5)
+                return True
+            except (OSError, subprocess.SubprocessError):
+                continue
+        return False
+
     def on_server_status_change(self, status: str):
         """Handle server status changes."""
         self.is_server_running = self.server_controller.is_running
@@ -407,12 +485,7 @@ class MCPTrayApp:
     def show_about(self, icon=None, item=None):
         """Show about information via notification."""
         try:
-            # Try to get version from package metadata
-            try:
-                import importlib.metadata
-                version = importlib.metadata.version("elitea-mcp")
-            except (ImportError, importlib.metadata.PackageNotFoundError):
-                version = "0.1.16"  # Fallback version
+            version = get_installed_version() or "unknown (development checkout)"
             
             # Create about message
             title = "ELITEA MCP Client"
@@ -427,7 +500,7 @@ class MCPTrayApp:
         except Exception as e:
             logger.error(f"Error showing about dialog: {e}")
             # Fallback notification
-            self.show_notification("ELITEA MCP Client", "Version: 0.1.16\nMCP client for ELITEA platform")
+            self.show_notification("ELITEA MCP Client", "MCP client for ELITEA platform")
 
     def show_error(self, title, message):
         """Show error message in console and as notification."""
@@ -496,8 +569,17 @@ class MCPTrayApp:
         """Quit the application."""
         if self.is_server_running:
             self.stop_server()
+        if self.update_checker:
+            self.update_checker.stop()
         if self.icon:
             self.icon.stop()
+
+    def _on_tray_ready(self, icon):
+        """Show the icon, report a finished update and start the background update checks."""
+        icon.visible = True
+        self.report_update_result()
+        if self.update_checker:
+            self.update_checker.start()
 
     def run(self):
         """Start the tray application."""
@@ -517,7 +599,7 @@ class MCPTrayApp:
         logger.info("Starting EliteA MCP Client tray application...")
         logger.info("Right-click the tray icon for options")
         logger.info("Use 'Open Config File' to edit configuration")
-        self.icon.run()
+        self.icon.run(setup=self._on_tray_ready)
 
     def _hide_from_dock(self):
         """Hide the application from the macOS dock."""
@@ -544,7 +626,7 @@ class MCPTrayApp:
             pass
 
 
-def run_tray():
+def run_tray(tray_flags=None):
     """Entry point for the tray application."""
     # Set fork safety for macOS BEFORE any other imports or operations
     if platform.system() == "Darwin":
@@ -559,7 +641,7 @@ def run_tray():
     except Exception as e:
         logger.warning(f"Could not set up file logging: {e}")
     
-    app = MCPTrayApp()
+    app = MCPTrayApp(tray_flags)
     app.run()
 
 

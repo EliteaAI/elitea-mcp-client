@@ -214,6 +214,7 @@ def macos_gui_daemonize(pid_file=None, log_file=None):
             cmd = [python_cmd, '-m', 'elitea_mcp.main', 'tray']
         else:
             cmd = [elitea_mcp_cmd, 'tray']
+        cmd += ['--pid-file', str(pid_file), '--log-file', str(log_file)]
         
         # Set up environment for the subprocess
         env = os.environ.copy()
@@ -363,7 +364,11 @@ def get_default_paths():
             'serve_pid': pid_dir / 'elitea-mcp-serve.pid',
             'tray_pid': pid_dir / 'elitea-mcp-tray.pid',
             'serve_log': log_dir / 'elitea-mcp-serve.log',
-            'tray_log': log_dir / 'elitea-mcp-tray.log'
+            'tray_log': log_dir / 'elitea-mcp-tray.log',
+            'update_log': log_dir / 'elitea-mcp-update.log',
+            'update_job': pid_dir / 'elitea-mcp-update-job.json',
+            'update_result': pid_dir / 'elitea-mcp-update-result.json',
+            'update_helper': pid_dir / 'elitea-mcp-update-helper.py',
         }
     else:
         # Windows - use temp directory
@@ -373,7 +378,11 @@ def get_default_paths():
             'serve_pid': temp_dir / 'elitea-mcp-serve.pid',
             'tray_pid': temp_dir / 'elitea-mcp-tray.pid', 
             'serve_log': temp_dir / 'elitea-mcp-serve.log',
-            'tray_log': temp_dir / 'elitea-mcp-tray.log'
+            'tray_log': temp_dir / 'elitea-mcp-tray.log',
+            'update_log': temp_dir / 'elitea-mcp-update.log',
+            'update_job': temp_dir / 'elitea-mcp-update-job.json',
+            'update_result': temp_dir / 'elitea-mcp-update-result.json',
+            'update_helper': temp_dir / 'elitea-mcp-update-helper.py',
         }
 
 def bootstrap(deployment_url=None, auth_token=None, host='0.0.0.0', port=8000):
@@ -396,6 +405,15 @@ def bootstrap(deployment_url=None, auth_token=None, host='0.0.0.0', port=8000):
     
     if config["deployment_url"]:
         bootstrap_servers(config)
+
+def build_tray_relaunch_flags(args, is_daemon_subprocess):
+    """Rebuild the tray flags, because the macOS daemon child is started without --daemon."""
+    flags = ['--daemon'] if args.daemon or is_daemon_subprocess else []
+    if args.pid_file:
+        flags += ['--pid-file', args.pid_file]
+    if args.log_file:
+        flags += ['--log-file', args.log_file]
+    return flags
 
 def cli():
     parser = argparse.ArgumentParser(description='MCP Client')
@@ -475,6 +493,7 @@ def cli():
         
         # Check if this is a daemon subprocess (even without --daemon flag)
         is_daemon_subprocess = os.environ.get('ELITEA_MCP_DAEMON_MODE') == 'true'
+        tray_relaunch_flags = build_tray_relaunch_flags(args, is_daemon_subprocess)
         
         # Handle daemon mode for tray command
         if (hasattr(args, 'daemon') and args.daemon) and not is_daemon_subprocess:
@@ -495,12 +514,12 @@ def cli():
             else:
                 # Traditional Unix daemonization for non-macOS systems
                 if daemonize(str(pid_file), str(log_file)):
-                    run_tray()
+                    run_tray(tray_relaunch_flags)
         else:
             # Normal mode or daemon subprocess
             if is_daemon_subprocess:
                 logger.info("Running in macOS daemon subprocess...")
-            run_tray()
+            run_tray(tray_relaunch_flags)
     elif args.command == "run" or args.command is None:
         main(
             project_id=args.project_id if hasattr(args, 'project_id') else None,

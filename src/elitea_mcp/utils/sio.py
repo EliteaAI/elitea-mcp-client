@@ -1,7 +1,6 @@
 import asyncio
-import os
-import ssl
 import threading
+import time
 from typing import Callable, Any, Dict, Iterable, List
 
 import socketio
@@ -10,8 +9,18 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
+from ..config import is_ssl_verification_enabled
 from .session_manager import get_session_manager
 from .tool_result import render_tool_result
+
+CONNECT_ATTEMPTS = 3
+CONNECT_RETRY_DELAY = 2
+REGISTRATION_TIMEOUT = 30
+DECLINED_NOTIFICATION_SUFFIX = " - declined."
+
+
+class PlatformConnectionError(Exception):
+    """The platform could not be reached or refused to register the local MCP servers."""
 
 
 def _sanitize_server_tools(all_tools: Any) -> List[Dict[str, Any]]:
@@ -96,39 +105,62 @@ def _sanitize_server_tools(all_tools: Any) -> List[Dict[str, Any]]:
     return sanitized_servers
 
 
-def start_socket_connection(config, all_tools, notify_on_connect: Callable[[str], None] = None, notify_on_disconnect: Callable[[str], None] = None):
-    # Check if SSL verification should be disabled (useful for corporate environments)
-    # Priority: environment variable > config file > default (disabled for corporate environments)
-    env_ssl_setting = os.environ.get('ELITEA_DISABLE_SSL_VERIFY', '').lower()
-    if env_ssl_setting in ('true', 'false'):
-        disable_ssl_verify = env_ssl_setting == 'true'
-    else:
-        disable_ssl_verify = not config.get("ssl_verify", False)
-    
-    if disable_ssl_verify:
-        # Create SocketIO client with SSL verification disabled
-        # The ssl_verify parameter should be passed during client creation
-        sio = socketio.Client(ssl_verify=False, logger=False, engineio_logger=False)
-        print("SSL verification disabled for SocketIO connection")
-    else:
+def start_socket_connection(config, all_tools, notify_status: Callable[[str], None] = None, notify_error: Callable[[str], None] = None):
+    notify_status = notify_status or _ignore_message
+    notify_error = notify_error or _ignore_message
+
+    if is_ssl_verification_enabled(config):
         sio = socketio.Client()
         print("SSL verification enabled for SocketIO connection")
+    else:
+        sio = socketio.Client(ssl_verify=False, logger=False, engineio_logger=False)
+        print("SSL verification disabled for SocketIO connection")
+
+    registration = {"done": False}
+
+    def register_on_platform():
+        """Register the local MCP servers and report the platform's answer, raising when it refuses them."""
+        try:
+            ack = sio.call("mcp_connect", {
+                "project_id": config["project_id"],
+                "toolkit_configs": _sanitize_server_tools(all_tools),
+                "timeout_tools_list": config['timeout'],
+                "timeout_tools_call": config['timeout']
+            }, timeout=REGISTRATION_TIMEOUT)
+        except socketio.exceptions.TimeoutError:
+            raise PlatformConnectionError(f"The platform did not confirm the registration within {REGISTRATION_TIMEOUT} seconds.") from None
+        if isinstance(ack, dict) and ack.get("ok") is False:
+            raise PlatformConnectionError(ack.get("message") or f"The platform refused the connection: {ack.get('error')}")
+        print("Connected to platform")
+        notify_status("Connected to platform")
+
+    def register_after_reconnect(connection_sid):
+        """Register again after an automatic reconnect, because the platform forgets a client's servers when its socket drops."""
+        try:
+            register_on_platform()
+        except PlatformConnectionError as error:
+            if sio.get_sid() != connection_sid:
+                return
+            print(f"Failed to register on platform: {error}")
+            notify_error(str(error))
+            sio.disconnect()
 
     @sio.event
     def connect():
-        sio.emit("mcp_connect", {
-            "project_id": config["project_id"],
-            "toolkit_configs": _sanitize_server_tools(all_tools),
-            "timeout_tools_list": config['timeout'],
-            "timeout_tools_call": config['timeout']
-        })
-        print("Connected to platform")
-        notify_on_connect and notify_on_connect("Connected to platform")
+        if registration["done"]:
+            sio.start_background_task(register_after_reconnect, sio.get_sid())
 
     @sio.event
-    def disconnect():
-        print("Disconnected from platform")
-        notify_on_disconnect and notify_on_disconnect("Disconnected from platform")
+    def disconnect(reason):
+        if reason == sio.reason.CLIENT_DISCONNECT:
+            print("Disconnected from platform")
+            notify_status("Disconnected from platform")
+        elif reason == sio.reason.SERVER_DISCONNECT:
+            print("Disconnected by the platform")
+            notify_error("Disconnected by the platform")
+        else:
+            print("Connection lost, reconnecting...")
+            notify_status("Connection lost, reconnecting...")
         # Clean up persistent sessions when disconnecting
         session_manager = get_session_manager()
         try:
@@ -163,26 +195,30 @@ def start_socket_connection(config, all_tools, notify_on_connect: Callable[[str]
     @sio.event
     def on_mcp_notification(notification):
         print(f"Platform Notification: {notification}")
+        if isinstance(notification, str) and notification.endswith(DECLINED_NOTIFICATION_SUFFIX):
+            server_name = notification[:-len(DECLINED_NOTIFICATION_SUFFIX)]
+            notify_status(
+                f'Server "{server_name}" was declined: a server with this name is already registered in project '
+                f'{config["project_id"]} (another running client, or a session that has not timed out yet).'
+            )
 
     @sio.event
     def on_mcp_ping(data):
         return True
 
-    try:
-        sio.connect(config["deployment_url"], headers={
-            'Authorization': f"Bearer {config['auth_token']}"}, 
-            wait_timeout=30,
-            retry=True)
-    except Exception as e:
-        print(f"Failed to connect to platform: {e}")
-        print("This might be due to SSL certificate issues or network connectivity problems.")
-        print("Please check your network connection and try again.")
-        raise
+    _connect_with_retries(sio, config, notify_status)
 
     sio.on('mcp_tools_list', on_mcp_tools_list)
     sio.on('mcp_tools_call', on_mcp_tools_call)
     sio.on('mcp_notification', on_mcp_notification)
     sio.on('mcp_ping', on_mcp_ping)
+
+    try:
+        register_on_platform()
+    except PlatformConnectionError:
+        sio.disconnect()
+        raise
+    registration["done"] = True
 
     def socketio_background_task():
         sio.wait()
@@ -191,6 +227,27 @@ def start_socket_connection(config, all_tools, notify_on_connect: Callable[[str]
     socketio_thread.start()
 
     return sio
+
+
+def _connect_with_retries(sio, config, notify_status):
+    """Open the socket, giving up after a few attempts so a wrong address fails instead of retrying silently forever."""
+    for attempt in range(1, CONNECT_ATTEMPTS + 1):
+        try:
+            sio.connect(config["deployment_url"], headers={
+                'Authorization': f"Bearer {config['auth_token']}"},
+                wait_timeout=30)
+            return
+        except socketio.exceptions.ConnectionError as error:
+            last_error = error
+            if attempt < CONNECT_ATTEMPTS:
+                notify_status(f"Cannot connect to platform ({error}), retrying (attempt {attempt + 1}/{CONNECT_ATTEMPTS})...")
+                time.sleep(CONNECT_RETRY_DELAY * attempt)
+    print(f"Failed to connect to platform: {last_error}")
+    raise PlatformConnectionError(f"Could not connect to {config['deployment_url']} after {CONNECT_ATTEMPTS} attempts: {last_error}")
+
+
+def _ignore_message(message: str):
+    """Stand in for a notification callback the caller did not provide."""
 
 
 def _mcp_tools_call_sync(server_conf, params, server_name=None):

@@ -28,10 +28,11 @@ class LogCapture:
         return self.log_capture.getvalue()
 
 class TestMain(unittest.TestCase):
+    @patch("src.elitea_mcp.main.validate_platform_config", side_effect=lambda config, notify: config)
     @patch("src.elitea_mcp.main.get_bootstrap_config", return_value={"deployment_url": "http://example.com", "auth_token": "token", "host": "0.0.0.0", "port": 8000})
     @patch("src.elitea_mcp.main.run")
     @patch("src.elitea_mcp.main.Agent")
-    def test_main_run_with_app_id(self, mock_agent_class, mock_run, mock_get_config):
+    def test_main_run_with_app_id(self, mock_agent_class, mock_run, mock_get_config, mock_validate_platform_config):
         # Setup mock Agent instance
         mock_agent = MagicMock()
         mock_agent_class.return_value = mock_agent
@@ -137,9 +138,10 @@ class TestMain(unittest.TestCase):
             mock_set_config.assert_called_once_with("http://custom.com", "custom-token", "127.0.0.1", 9000)
             mock_bootstrap_servers.assert_called_once_with({"deployment_url": "http://custom.com", "auth_token": "custom-token"})
 
+    @patch("src.elitea_mcp.main.validate_platform_config", side_effect=lambda config, notify: config)
     @patch("src.elitea_mcp.main.run")
     @patch("src.elitea_mcp.main.Agents")
-    def test_main_run_with_command_line_args(self, mock_agents_class, mock_run):
+    def test_main_run_with_command_line_args(self, mock_agents_class, mock_run, mock_validate_platform_config):
         """Test that run command works with deployment_url and auth_token arguments without config file"""
         # Setup mock Agents instance and its agents attribute
         mock_agents = MagicMock()
@@ -170,8 +172,9 @@ class TestMain(unittest.TestCase):
                 api_extra_headers=None
             )
 
+    @patch("src.elitea_mcp.main.validate_platform_config", side_effect=lambda config, notify: config)
     @patch("src.elitea_mcp.main.get_bootstrap_config", return_value={})
-    def test_main_run_command_line_args_override_config(self, mock_get_config):
+    def test_main_run_command_line_args_override_config(self, mock_get_config, mock_validate_platform_config):
         """Test that command-line arguments override config file values"""
         with patch("src.elitea_mcp.main.Agents") as mock_agents_class:
             with patch("src.elitea_mcp.main.run") as mock_run:

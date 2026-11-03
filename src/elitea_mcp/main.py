@@ -14,8 +14,9 @@ from .config import (
     get_bootstrap_config,
     interactive_bootstrap,
 )
-from .clients.elitea import Agent, Agents
+from .clients.elitea import Agent, Agents, ApiDetailsRequestError
 from .server.mcp import run
+from .utils.preflight import PreflightError, validate_platform_config
 
 # Configure logging - avoid stdout to prevent MCP stdio interference
 def configure_logging(use_stdout=True, level=logging.WARNING):
@@ -146,20 +147,37 @@ def main(project_id=None, application_id=None, version_id=None, transport="stdio
     if not project_id:
         logger.error("Project ID is required")
         return
-        
-    if not application_id:
-        # Using project-level agents when only project_id is provided
-        client = Agents(base_url=deployment_url,
+
+    try:
+        validated = validate_platform_config({
+            "deployment_url": deployment_url,
+            "auth_token": auth_token,
+            "project_id": project_id,
+            "ssl_verify": config.get("ssl_verify", False),
+        }, logger.warning)
+    except PreflightError as error:
+        logger.error(str(error))
+        return
+    deployment_url = validated["deployment_url"]
+    project_id = validated["project_id"]
+
+    try:
+        if not application_id:
+            # Using project-level agents when only project_id is provided
+            client = Agents(base_url=deployment_url,
+                            project_id=project_id,
+                            auth_token=auth_token,
+                            api_extra_headers=None).agents
+        else:
+            # Using specific agent when application_id is provided
+            client = Agent(base_url=deployment_url,
                         project_id=project_id,
                         auth_token=auth_token,
-                        api_extra_headers=None).agents
-    else:
-        # Using specific agent when application_id is provided
-        client = Agent(base_url=deployment_url,
-                    project_id=project_id,
-                    auth_token=auth_token,
-                    app_id = application_id,
-                    version_id=version_id)
+                        app_id = application_id,
+                        version_id=version_id)
+    except ApiDetailsRequestError as error:
+        logger.error(str(error))
+        return
         
     logger.debug(f"Config: {config}")
     

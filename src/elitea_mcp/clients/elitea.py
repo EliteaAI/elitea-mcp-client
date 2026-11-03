@@ -11,6 +11,17 @@ class ApiDetailsRequestError(Exception):
     ...
 
 
+def _describe_failure(response) -> str:
+    """Summarise a failed platform response by status code and error field, keeping the raw body out of user-facing messages."""
+    logger.debug("Platform response %s: %s", response.status_code, response.text)
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    detail = body.get("error") if isinstance(body, dict) else None
+    return f"HTTP {response.status_code}: {detail}" if detail else f"HTTP {response.status_code}"
+
+
 class Agents():
     def __init__(self, 
                  base_url: str,
@@ -38,7 +49,7 @@ class Agents():
         url = f"{self.get_tags}{self.project_id}?entity_coverage=all"
         response = requests.get(url, headers=self.headers, verify=False)
         if response.status_code != 200:
-            raise ApiDetailsRequestError(f"Failed to fetch agent details: {response.text}")
+            raise ApiDetailsRequestError(f"Failed to fetch agent details: {_describe_failure(response)}")
         for tag in response.json().get("rows", []):
             if tag.get("name") == 'mcp':
                 return tag.get("id")
@@ -49,7 +60,7 @@ class Agents():
         url = f"{self.app_versions_list}{self.project_id}/{app_id}"
         response = requests.get(url, headers=self.headers, verify=False)
         if response.status_code != 200:
-            raise ApiDetailsRequestError(f"Failed to fetch agent details: {response.text}")
+            raise ApiDetailsRequestError(f"Failed to fetch agent details: {_describe_failure(response)}")
         latest_version = 0
         for version in response.json():
             if version.get("latest"):
@@ -60,16 +71,18 @@ class Agents():
         if latest_version > 0:
             return latest_version
         else:
-            raise ApiDetailsRequestError(f"Failed to fetch agent details: {response.text}")
+            raise ApiDetailsRequestError(f"Failed to fetch agent details: application {app_id} has no versions in project {self.project_id}")
         
     def _get_list_of_apps(self) -> List[Dict[str, Any]]:
         tag_id = self._mcp_tag_id()
         if not tag_id:
-            raise ApiDetailsRequestError("No MCP tag found")
+            raise ApiDetailsRequestError(
+                f'No agents tagged "mcp" in project {self.project_id}. Add the "mcp" tag to the agents you want to expose.'
+            )
         url = f"{self.apps_list_url}{self.project_id}?limit=100&tags={tag_id}&pipeline_only=0"
         response = requests.get(url, headers=self.headers, verify=False)
         if response.status_code != 200:
-            raise ApiDetailsRequestError(f"Failed to fetch agent details: {response.text}")
+            raise ApiDetailsRequestError(f"Failed to fetch agent details: {_describe_failure(response)}")
         logger.debug(f"Response: {response.json()}")
         for app in response.json().get("rows", []):
             app_version =self._get_app_version_id(app.get("id"))
@@ -131,7 +144,7 @@ class Agent():
         url = f"{self.app_details}{self.project_id}/{self.application_id}"
         response = requests.get(url, headers=self.headers, verify=False)
         if response.status_code != 200:
-            raise ApiDetailsRequestError(f"Failed to fetch agent details: {response.text}")
+            raise ApiDetailsRequestError(f"Failed to fetch agent details: {_describe_failure(response)}")
         self.agent_name = response.json().get("name")
         self.description = response.json().get("description")
         
@@ -145,9 +158,9 @@ class Agent():
         """
         url = f"{self.application_versions}{self.project_id}/{self.application_id}/{self.version_id}"
         response = requests.get(url, headers=self.headers, verify=False)
-        self.pydantic_model = self._create_pydantic_model(response.json())
         if response.status_code != 200:
-            raise ApiDetailsRequestError(f"Failed to fetch agent details: {response.text}")
+            raise ApiDetailsRequestError(f"Failed to fetch agent details: {_describe_failure(response)}")
+        self.pydantic_model = self._create_pydantic_model(response.json())
         
     
     def predict(self, user_input: str, chat_history: Optional[List[Dict[str, str]]] = None, **kwargs) -> Dict[str, Any]:
@@ -184,6 +197,6 @@ class Agent():
         response = requests.post(url, headers=self.headers, json=payload, verify=False)
         
         if response.status_code != 200:
-            raise ApiDetailsRequestError(f"Failed to fetch prediction: {response.text}")
+            raise ApiDetailsRequestError(f"Failed to fetch prediction: {_describe_failure(response)}")
         
         return response.json()

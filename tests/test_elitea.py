@@ -172,6 +172,34 @@ class TestAgent:
                     version_id=789
                 )
     
+    @patch("requests.get")
+    def test_agent_version_details_error_reports_status_before_parsing_the_body(self, mock_get, mock_agent_response):
+        """A non-JSON error page from the version endpoint is reported by status code, not as a JSON decode error or raw HTML."""
+        html_error = MagicMock()
+        html_error.status_code = 401
+        html_error.text = "<html><body>Login</body></html>"
+        html_error.json.side_effect = json.JSONDecodeError("Expecting value", "<html>", 0)
+        mock_get.side_effect = [mock_agent_response["app_details"], html_error]
+
+        with pytest.raises(ApiDetailsRequestError) as error:
+            Agent(base_url="http://example.com", project_id=123, auth_token="test_token", app_id=456, version_id=789)
+
+        assert str(error.value) == "Failed to fetch agent details: HTTP 401"
+
+    @patch("requests.get")
+    def test_agents_error_names_the_platform_error_field(self, mock_get):
+        """A JSON error body is reduced to its error field."""
+        forbidden = MagicMock()
+        forbidden.status_code = 403
+        forbidden.text = '{"ok": false, "error": "access_denied", "required": ["models.promptlib_shared.tags.list"]}'
+        forbidden.json.return_value = json.loads(forbidden.text)
+        mock_get.return_value = forbidden
+
+        with pytest.raises(ApiDetailsRequestError) as error:
+            Agents(base_url="http://example.com", project_id=13, auth_token="test_token")
+
+        assert str(error.value) == "Failed to fetch agent details: HTTP 403: access_denied"
+
     @patch("requests.post")
     def test_agent_predict(self, mock_post):
         """Test the predict method."""
@@ -652,8 +680,9 @@ class TestAgents:
         mock_tag_id.return_value = None
         
         agents = Agents.__new__(Agents)
+        agents.project_id = 13
         
-        with pytest.raises(ApiDetailsRequestError, match="No MCP tag found"):
+        with pytest.raises(ApiDetailsRequestError, match='No agents tagged "mcp" in project 13'):
             agents._get_list_of_apps()
     
     @patch.object(Agents, "_mcp_tag_id")

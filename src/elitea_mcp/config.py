@@ -48,6 +48,13 @@ def load_config():
         
         return config
 
+def is_ssl_verification_enabled(config):
+    """Decide TLS verification for platform calls; the environment overrides the config, which defaults to off for corporate proxies."""
+    env_setting = os.environ.get('ELITEA_DISABLE_SSL_VERIFY', '').lower()
+    if env_setting in ('true', 'false'):
+        return env_setting == 'false'
+    return bool(config.get("ssl_verify", False))
+
 def save_config(config):
     """Save configuration to the config file."""
     with open(get_config_file(), "w") as f:

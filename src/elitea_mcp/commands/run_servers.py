@@ -3,11 +3,16 @@ import sys
 
 from ..config import load_config
 from ..utils.menu import show_menu
-from ..utils.sio import start_socket_connection, get_all_tools
+from ..utils.preflight import PreflightError, validate_platform_config
+from ..utils.sio import PlatformConnectionError, start_socket_connection, get_all_tools
 
 
 def run_servers():
-    config = load_config()
+    try:
+        config = validate_platform_config(load_config())
+    except PreflightError as error:
+        print(f"Cannot connect to platform: {error}")
+        sys.exit(1)
     print("\nMcp Servers from configuration:")
     print(", ".join(config["servers"].keys()))
     print("\nConnecting to the servers...")
@@ -28,7 +33,11 @@ def run_servers():
     try:
         # show_menu(tree)
         print(f"\nStarting MCP client...")
-        start_socket_connection(config, all_tools)
+        try:
+            start_socket_connection(config, all_tools)
+        except PlatformConnectionError as error:
+            print(f"Cannot connect to platform: {error}")
+            sys.exit(1)
         while True:
             user_input = input("").strip()
             

@@ -114,12 +114,6 @@ def test_the_error_points_to_the_backup_when_one_exists(config_file):
     assert str(caught.value).endswith(f"The last valid config is saved in {config_file}.bak")
 
 
-def test_bootstrap_rewrites_an_empty_file_as_its_hint_promises(config_file):
-    config_file.write_text("", encoding="utf-8")
-    set_bootstrap_config("https://elitea.example.com", "token")
-    assert load_config()["deployment_url"] == "https://elitea.example.com"
-
-
 def test_bootstrap_refuses_to_overwrite_a_file_with_a_syntax_error(config_file):
     config_file.write_text('{"servers": {"fs": {}},}', encoding="utf-8")
     with pytest.raises(ConfigError):

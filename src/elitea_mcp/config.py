@@ -5,7 +5,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from .config_errors import ConfigError, ConfigMistake, EmptyConfigError, backup_file_for, parse_config
+from .config_errors import ConfigError, ConfigMistake, backup_file_for, parse_config
 from .utils.name import sanitize
 from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS
 from appdirs import user_config_dir
@@ -61,14 +61,6 @@ def read_config_text(config_stream, config_file):
                           ConfigMistake.NOT_UTF8) from None
 
 
-def load_config_for_bootstrap():
-    """Load the config bootstrap writes back, starting over only from an empty file since it holds nothing to keep."""
-    try:
-        return load_config()
-    except EmptyConfigError:
-        return {}
-
-
 def is_ssl_verification_enabled(config):
     """Decide TLS verification for platform calls; the environment overrides the config, which defaults to off for corporate proxies."""
     env_setting = os.environ.get('ELITEA_DISABLE_SSL_VERIFY', '').lower()
@@ -103,7 +95,7 @@ def backup_valid_config(config_file):
 
 def set_bootstrap_config(deployment_url, auth_token, host='0.0.0.0', port=8000):
     """Set bootstrap configuration values."""
-    config = load_config_for_bootstrap()
+    config = load_config()
     config["deployment_url"] = deployment_url
     config["auth_token"] = auth_token
     config["host"] = host
@@ -132,7 +124,7 @@ def interactive_bootstrap():
     Interactive bootstrap configuration by prompting user for values.
     Returns the updated configuration.
     """
-    config = load_config_for_bootstrap()
+    config = load_config()
     current_url = config.get("deployment_url", "")
     current_token = config.get("auth_token", "")
     current_host = config.get("host", "0.0.0.0")

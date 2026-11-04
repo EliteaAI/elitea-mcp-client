@@ -18,7 +18,7 @@ class ConfigMistake(Enum):
     SINGLE_QUOTE = "Use double quotes for keys and strings."
     MISSING_COMMA = "Add a comma between items."
     UNCLOSED = "The file ends too early; check that every { and [ has its closing } and ]."
-    EMPTY_FILE = "Write {} into it or run elitea-mcp bootstrap."
+    EMPTY_FILE = "Write {} into it."
     NOT_OBJECT = "The whole file must be one JSON object wrapped in { }."
     NOT_UTF8 = "Save the file with UTF-8 encoding."
     UNKNOWN = "Check the JSON syntax at this position."
@@ -66,10 +66,6 @@ class ConfigError(Exception):
         return "\n".join(lines)
 
 
-class EmptyConfigError(ConfigError):
-    """An empty config file, which holds nothing worth keeping when bootstrap rewrites it."""
-
-
 def backup_file_for(config_file):
     config_file = Path(str(config_file))
     return config_file.with_name(config_file.name + ".bak")
@@ -78,8 +74,8 @@ def backup_file_for(config_file):
 def parse_config(text, config_file):
     """Return the config object in text, raising ConfigError with the position and a fix hint when it is not one."""
     if not text.strip():
-        raise EmptyConfigError(config_file, "Config file is not valid JSON", "The file is empty",
-                               ConfigMistake.EMPTY_FILE, line=1, column=1)
+        raise ConfigError(config_file, "Config file is not valid JSON", "The file is empty",
+                          ConfigMistake.EMPTY_FILE, line=1, column=1)
     try:
         config = json.loads(text)
     except json.JSONDecodeError as error:

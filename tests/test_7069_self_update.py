@@ -139,6 +139,29 @@ def test_helper_job_relaunches_the_tray_from_the_same_environment(tmp_path, monk
     assert helper_command[1:] == [str(paths["update_helper"]), str(paths["update_job"])]
 
 
+@pytest.fixture
+def daemon_umask():
+    """Run as a Linux `tray --daemon` does, with the umask daemonize() clears to 0."""
+    previous = os.umask(0)
+    yield
+    os.umask(previous)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="umask does not govern Windows file permissions")
+def test_update_from_a_daemon_never_installs_world_writable_files(tmp_path, monkeypatch, daemon_umask):
+    paths = update_paths(tmp_path)
+    installed_file = tmp_path / "installed.py"
+
+    def run_installer_like_the_helper(command):
+        subprocess.run([sys.executable, "-c", f"open({str(installed_file)!r}, 'w').close()"], check=True)
+
+    monkeypatch.setattr(self_update, "spawn_detached", run_installer_like_the_helper)
+    plan = UpgradePlan(["/usr/bin/pipx", "upgrade", "elitea-mcp"], can_run=True)
+    self_update.start_update_helper(plan, "0.1.36", "0.1.37", False, False, paths)
+    for created in (paths["update_helper"], paths["update_job"], installed_file):
+        assert created.stat().st_mode & 0o022 == 0, created
+
+
 def run_helper(tmp_path, upgrade_exit_code, current, target):
     """Run the real helper script on an already-exited tray and return its result and relaunch marker."""
     paths = update_paths(tmp_path)

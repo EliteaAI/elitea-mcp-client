@@ -102,6 +102,7 @@ def build_relaunch_command():
 
 def start_update_helper(plan, current, target, servers_were_running, server_daemon_mode, paths):
     """Copy the helper out of the package and start it detached, so the upgrade can replace the package."""
+    os.umask(os.umask(0) | 0o022)
     helper_path = Path(paths["update_helper"])
     helper_path.write_text(Path(update_helper.__file__).read_text())
     job = {

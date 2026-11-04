@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 package_name = "elitea-mcp"
 PYPI_URL = f"https://pypi.org/pypi/{package_name}/json"
-RELEASE_NOTES_URL = "https://github.com/EliteaAI/elitea-mcp-client/releases/tag/v{version}"
 CHECK_TIMEOUT = (3, 5)
 DEFAULT_CHECK_INTERVAL_HOURS = 24
 CHECK_FAILURE_REASONS = (
@@ -53,11 +52,6 @@ class UpdateState:
     def can_update(self) -> bool:
         """Tell whether the one-click update can install the latest release here."""
         return self.is_update_available and self.is_python_supported
-
-    @property
-    def release_notes_url(self) -> str:
-        """Point at the GitHub release page of the latest version."""
-        return RELEASE_NOTES_URL.format(version=self.latest)
 
     def describe(self) -> str:
         """Phrase the check outcome as the message the tray shows."""

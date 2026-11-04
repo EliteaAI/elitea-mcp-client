@@ -207,7 +207,6 @@ Right-click the tray icon to access:
 #### Updates
 - **Check for Updates** - Check PyPI now and report whether you are up to date, an update is available, or the check failed
 - **Update to x.y.z and Restart** - Shown when an update is available; upgrades with the tool you installed with (pipx, uv, or pip), restarts the tray on the new version, and starts the servers again if they were running
-- **Release Notes for x.y.z** - Open the release page of the available version
 
 The tray checks for updates at startup and then every 24 hours. Set `"update_check": false` in `config.json` to turn checks off, or `"update_check_interval_hours"` to change the interval. If the tray cannot run the upgrade itself (for example, a development install or no write permission), it shows the command to run and copies it to the clipboard. The upgrade output goes to `elitea-mcp-update.log` next to the tray log.
 

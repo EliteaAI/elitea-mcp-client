@@ -165,7 +165,6 @@ def test_menu_build_never_calls_the_network():
 def test_update_items_follow_the_cached_state():
     app, bootstrap = build_tray(state=UpdateState("0.1.36", "0.1.37"))
     assert "Update to 0.1.37 and Restart" in menu_texts(app, bootstrap)
-    assert "Release Notes for 0.1.37" in menu_texts(app, bootstrap)
     app.update_checker.state = UpdateState("0.1.37", "0.1.37")
     texts = menu_texts(app, bootstrap)
     assert "Check for Updates" in texts

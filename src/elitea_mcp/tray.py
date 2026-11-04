@@ -10,7 +10,6 @@ import subprocess
 import platform
 import multiprocessing
 import logging
-import webbrowser
 
 logger = logging.getLogger(__name__)
 
@@ -233,10 +232,8 @@ class MCPTrayApp:
             update_state = self.update_checker.state
             menu_items.append(pystray.MenuItem("Check for Updates", self.check_for_updates))
             if update_state.can_update:
-                menu_items.extend([
-                    pystray.MenuItem(f"Update to {update_state.latest} and Restart", self.update_and_restart),
-                    pystray.MenuItem(f"Release Notes for {update_state.latest}", self.open_release_notes),
-                ])
+                menu_items.append(
+                    pystray.MenuItem(f"Update to {update_state.latest} and Restart", self.update_and_restart))
             menu_items.append(pystray.Menu.SEPARATOR)
         
         menu_items.extend([
@@ -250,7 +247,7 @@ class MCPTrayApp:
         """Refresh the menu after a background check and announce a newly found release."""
         self.update_menu()
         if state.can_update:
-            self.show_notification("Update Available", f"{state.describe()}\nRelease notes: {state.release_notes_url}")
+            self.show_notification("Update Available", state.describe())
 
     def check_for_updates(self, icon=None, item=None):
         """Check PyPI on a worker thread so the menu stays responsive, then report the outcome."""
@@ -260,10 +257,6 @@ class MCPTrayApp:
             self.show_notification("Check for Updates", self.update_checker.state.describe())
 
         threading.Thread(target=check, name="manual-update-check", daemon=True).start()
-
-    def open_release_notes(self, icon=None, item=None):
-        """Open the release page of the available version."""
-        webbrowser.open(self.update_checker.state.release_notes_url)
 
     def update_and_restart(self, icon=None, item=None):
         """Stop the servers and hand the upgrade to a detached helper, or show the command to run by hand."""

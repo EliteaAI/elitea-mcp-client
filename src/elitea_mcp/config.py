@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from .utils.name import sanitize
+from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS
 from appdirs import user_config_dir
 
 APP_NAME = "elitea-mcp-client"
@@ -82,6 +83,8 @@ def get_bootstrap_config():
         "project_id": config.get("project_id", None),
         "servers": config.get("servers", {}),
         "ssl_verify": config.get("ssl_verify", False),
+        "update_check": config.get("update_check", True),
+        "update_check_interval_hours": config.get("update_check_interval_hours", DEFAULT_CHECK_INTERVAL_HOURS),
     }
 
 def interactive_bootstrap():

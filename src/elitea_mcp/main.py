@@ -363,7 +363,11 @@ def get_default_paths():
             'serve_pid': pid_dir / 'elitea-mcp-serve.pid',
             'tray_pid': pid_dir / 'elitea-mcp-tray.pid',
             'serve_log': log_dir / 'elitea-mcp-serve.log',
-            'tray_log': log_dir / 'elitea-mcp-tray.log'
+            'tray_log': log_dir / 'elitea-mcp-tray.log',
+            'update_log': log_dir / 'elitea-mcp-update.log',
+            'update_job': pid_dir / 'elitea-mcp-update-job.json',
+            'update_result': pid_dir / 'elitea-mcp-update-result.json',
+            'update_helper': pid_dir / 'elitea-mcp-update-helper.py',
         }
     else:
         # Windows - use temp directory
@@ -373,7 +377,11 @@ def get_default_paths():
             'serve_pid': temp_dir / 'elitea-mcp-serve.pid',
             'tray_pid': temp_dir / 'elitea-mcp-tray.pid', 
             'serve_log': temp_dir / 'elitea-mcp-serve.log',
-            'tray_log': temp_dir / 'elitea-mcp-tray.log'
+            'tray_log': temp_dir / 'elitea-mcp-tray.log',
+            'update_log': temp_dir / 'elitea-mcp-update.log',
+            'update_job': temp_dir / 'elitea-mcp-update-job.json',
+            'update_result': temp_dir / 'elitea-mcp-update-result.json',
+            'update_helper': temp_dir / 'elitea-mcp-update-helper.py',
         }
 
 def bootstrap(deployment_url=None, auth_token=None, host='0.0.0.0', port=8000):

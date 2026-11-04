@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.elitea_mcp import main as main_module
 from src.elitea_mcp import tray as tray_module
 from src.elitea_mcp.utils import self_update, update_helper
 from src.elitea_mcp.utils.package_updates import UpdateState
@@ -41,7 +40,7 @@ def env(tmp_path, monkeypatch):
     site_packages.mkdir(parents=True)
     distribution = FakeDistribution(site_packages)
     monkeypatch.setattr(self_update.importlib.metadata, "distribution", lambda name: distribution)
-    monkeypatch.setattr(self_update, "find_tool", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(self_update.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(self_update, "is_pip_available", lambda: True)
     return Namespace(prefix=prefix, distribution=distribution, site_packages=site_packages)
 
@@ -75,7 +74,7 @@ def test_venv_without_pip_upgrades_through_uv(env, monkeypatch):
 
 def test_missing_installer_falls_back_to_a_manual_command(env, monkeypatch):
     (env.prefix / "pipx_metadata.json").write_text("{}")
-    monkeypatch.setattr(self_update, "find_tool", lambda name: None)
+    monkeypatch.setattr(self_update.shutil, "which", lambda name: None)
     plan = resolve_in_venv(env)
     assert not plan.can_run
     assert plan.display_command == "pipx upgrade elitea-mcp"
@@ -116,24 +115,6 @@ def test_user_site_install_upgrades_with_user_flag(env, monkeypatch):
     assert plan.command[-1] == "--user" and plan.can_run
 
 
-def test_find_tool_searches_user_dirs_missing_from_gui_path(tmp_path, monkeypatch):
-    user_bin = tmp_path / ".local" / "bin"
-    user_bin.mkdir(parents=True)
-    pipx = user_bin / "pipx"
-    pipx.write_text("#!/bin/sh\n")
-    pipx.chmod(0o755)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
-    assert self_update.find_tool("pipx") == str(pipx)
-
-
-def test_macos_daemon_child_relaunches_as_a_daemon():
-    args = Namespace(daemon=False, pid_file="/run/tray.pid", log_file="/log/tray.log")
-    assert main_module.build_tray_relaunch_flags(args, is_daemon_subprocess=True) == [
-        "--daemon", "--pid-file", "/run/tray.pid", "--log-file", "/log/tray.log"]
-    assert main_module.build_tray_relaunch_flags(Namespace(daemon=False, pid_file=None, log_file=None), False) == []
-
-
 def update_paths(tmp_path):
     """Lay out the update files under a temp dir."""
     return {
@@ -144,20 +125,18 @@ def update_paths(tmp_path):
     }
 
 
-def test_helper_job_relaunches_the_tray_outside_the_daemon_child(tmp_path, monkeypatch):
+def test_helper_job_relaunches_the_tray_from_the_same_environment(tmp_path, monkeypatch):
     paths = update_paths(tmp_path)
-    monkeypatch.setenv("ELITEA_MCP_DAEMON_MODE", "true")
     spawned = MagicMock()
     monkeypatch.setattr(self_update, "spawn_detached", spawned)
     plan = UpgradePlan(["/usr/bin/pipx", "upgrade", "elitea-mcp"], can_run=True)
-    self_update.start_update_helper(plan, "0.1.36", "0.1.37", ["--daemon"], True, False, paths)
+    self_update.start_update_helper(plan, "0.1.36", "0.1.37", True, False, paths)
     job = json.loads(paths["update_job"].read_text())
-    assert job["relaunch"] == [sys.executable, "-m", "elitea_mcp.main", "tray", "--daemon"]
+    assert job["relaunch"] == [sys.executable, "-m", "elitea_mcp.main", "tray"]
     assert job["upgrade"] == plan.command and job["target"] == "0.1.37" and job["servers_were_running"]
     assert paths["update_helper"].read_text() == HELPER_SCRIPT.read_text()
     helper_command, = spawned.call_args.args
     assert helper_command[1:] == [str(paths["update_helper"]), str(paths["update_job"])]
-    assert "ELITEA_MCP_DAEMON_MODE" not in spawned.call_args.kwargs["env"]
 
 
 def run_helper(tmp_path, upgrade_exit_code, current, target):
@@ -252,7 +231,7 @@ def build_tray():
     controller = MagicMock(daemon_mode=True)
     with patch.object(tray_module, "get_bootstrap_config", return_value=bootstrap), \
             patch.object(tray_module, "get_server_controller", return_value=controller):
-        app = tray_module.MCPTrayApp(["--daemon"])
+        app = tray_module.MCPTrayApp()
     app.update_checker.state = UpdateState("0.1.36", "0.1.37")
     app.icon = MagicMock()
     app.show_notification = MagicMock()
@@ -283,7 +262,7 @@ def test_update_stops_servers_then_hands_off_and_quits():
             patch.object(tray_module, "get_default_paths", return_value={}), \
             patch.object(tray_module, "start_update_helper", side_effect=lambda *a: calls.append(a)):
         app.update_and_restart()
-    assert calls == ["stop", (plan, "0.1.36", "0.1.37", ["--daemon"], True, True, {})]
+    assert calls == ["stop", (plan, "0.1.36", "0.1.37", True, True, {})]
     app.icon.stop.assert_called_once()
 
 

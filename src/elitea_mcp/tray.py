@@ -42,11 +42,10 @@ CLIPBOARD_COMMANDS = {
 
 
 class MCPTrayApp:
-    def __init__(self, tray_flags=None):
+    def __init__(self):
         self.icon = None
         self.server_controller = get_server_controller()
         self.is_server_running = False
-        self.tray_flags = tray_flags or []
         config = get_bootstrap_config()
         self.update_checker = (
             UpdateChecker(self.on_update_state_change, config["update_check_interval_hours"])
@@ -271,8 +270,8 @@ class MCPTrayApp:
         self.show_notification("Updating", f"Updating to {state.latest}. The tray will restart.")
         self.stop_server()
         try:
-            start_update_helper(plan, state.current, state.latest, self.tray_flags,
-                                servers_were_running, server_daemon_mode, get_default_paths())
+            start_update_helper(plan, state.current, state.latest, servers_were_running, server_daemon_mode,
+                                get_default_paths())
         except OSError as error:
             self.show_error("Update Failed", f"Could not start the updater: {error}")
             if servers_were_running:
@@ -619,7 +618,7 @@ class MCPTrayApp:
             pass
 
 
-def run_tray(tray_flags=None):
+def run_tray():
     """Entry point for the tray application."""
     # Set fork safety for macOS BEFORE any other imports or operations
     if platform.system() == "Darwin":
@@ -634,7 +633,7 @@ def run_tray(tray_flags=None):
     except Exception as e:
         logger.warning(f"Could not set up file logging: {e}")
     
-    app = MCPTrayApp(tray_flags)
+    app = MCPTrayApp()
     app.run()
 
 

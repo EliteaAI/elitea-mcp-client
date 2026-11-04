@@ -18,8 +18,6 @@ from .package_updates import package_name
 from . import update_helper
 from .update_helper import spawn_detached
 
-TOOL_DIRS_MISSING_FROM_GUI_PATH = ("~/.local/bin", "~/.cargo/bin", "/opt/homebrew/bin", "/usr/local/bin")
-DAEMON_SUBPROCESS_ENV = "ELITEA_MCP_DAEMON_MODE"
 
 
 @dataclass(frozen=True)
@@ -36,15 +34,9 @@ class UpgradePlan:
         return shlex.join(self.command)
 
 
-def find_tool(name):
-    """Locate an installer binary, including the usual user dirs that a GUI-launched tray's PATH lacks."""
-    extra_dirs = [os.path.expanduser(directory) for directory in TOOL_DIRS_MISSING_FROM_GUI_PATH]
-    return shutil.which(name, path=os.pathsep.join([os.environ.get("PATH", ""), *extra_dirs]))
-
-
 def plan_with_tool(tool, arguments):
     """Plan an upgrade through an installer binary, falling back to manual when it cannot be found."""
-    tool_path = find_tool(tool)
+    tool_path = shutil.which(tool)
     if tool_path:
         return UpgradePlan([tool_path, *arguments], can_run=True)
     return UpgradePlan([tool, *arguments], reason=f"{tool} was not found on PATH.")
@@ -103,12 +95,12 @@ def resolve_upgrade_plan(prefix=sys.prefix, base_prefix=sys.base_prefix, executa
     return plan_with_pip(pip_command, distribution)
 
 
-def build_relaunch_command(tray_flags):
-    """Start the tray again from the same environment with the flags it was launched with."""
-    return [sys.executable, "-m", "elitea_mcp.main", "tray", *tray_flags]
+def build_relaunch_command():
+    """Start the tray again from the same environment; the helper already runs it detached."""
+    return [sys.executable, "-m", "elitea_mcp.main", "tray"]
 
 
-def start_update_helper(plan, current, target, tray_flags, servers_were_running, server_daemon_mode, paths):
+def start_update_helper(plan, current, target, servers_were_running, server_daemon_mode, paths):
     """Copy the helper out of the package and start it detached, so the upgrade can replace the package."""
     helper_path = Path(paths["update_helper"])
     helper_path.write_text(Path(update_helper.__file__).read_text())
@@ -118,16 +110,14 @@ def start_update_helper(plan, current, target, tray_flags, servers_were_running,
         "target": target,
         "env_python": sys.executable,
         "upgrade": plan.command,
-        "relaunch": build_relaunch_command(tray_flags),
+        "relaunch": build_relaunch_command(),
         "log": str(paths["update_log"]),
         "result": str(paths["update_result"]),
         "servers_were_running": servers_were_running,
         "server_daemon_mode": server_daemon_mode,
     }
     Path(paths["update_job"]).write_text(json.dumps(job))
-    relaunch_env = {key: value for key, value in os.environ.items() if key != DAEMON_SUBPROCESS_ENV}
-    spawn_detached([getattr(sys, "_base_executable", sys.executable), str(helper_path), str(paths["update_job"])],
-                   env=relaunch_env)
+    spawn_detached([getattr(sys, "_base_executable", sys.executable), str(helper_path), str(paths["update_job"])])
 
 
 def consume_update_result(result_path):

@@ -28,11 +28,17 @@ if platform.system() == "Darwin":
 
 import pystray
 from PIL import Image, ImageDraw
+from .config_errors import ConfigError
 from .config import get_bootstrap_config, set_bootstrap_config, interactive_bootstrap, get_config_file
 from .utils.server_controller import get_server_controller
 from .main import main, setup_file_logger, get_default_paths
-from .utils.package_updates import UpdateChecker, get_installed_version
+from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS, UpdateChecker, get_installed_version
 from .utils.self_update import consume_update_result, resolve_upgrade_plan, start_update_helper
+
+STATUS_DOT_COLORS = {
+    "config_error": (229, 57, 53, 255),
+    "running": (76, 175, 80, 255),
+}
 
 CLIPBOARD_COMMANDS = {
     "darwin": [["pbcopy"]],
@@ -46,10 +52,12 @@ class MCPTrayApp:
         self.icon = None
         self.server_controller = get_server_controller()
         self.is_server_running = False
-        config = get_bootstrap_config()
+        self.config_error = None
+        config = self._read_config()
         self.update_checker = (
-            UpdateChecker(self.on_update_state_change, config["update_check_interval_hours"])
-            if config["update_check"] else None
+            UpdateChecker(self.on_update_state_change,
+                          config.get("update_check_interval_hours", DEFAULT_CHECK_INTERVAL_HOURS))
+            if config and config.get("update_check", True) else None
         )
         
         # Set up callbacks for server controller
@@ -115,10 +123,11 @@ class MCPTrayApp:
             return icon
     
     def _draw_status_dot(self, image):
-        if self.is_server_running:
+        status = "config_error" if self.config_error else "running" if self.is_server_running else None
+        if status:
             from PIL import ImageDraw
             draw = ImageDraw.Draw(image)
-            dot_color = (76, 175, 80, 255)
+            dot_color = STATUS_DOT_COLORS[status]
             dot_radius = 12
             margin = 0
             x0 = image.width - dot_radius * 2 - margin
@@ -195,16 +204,23 @@ class MCPTrayApp:
         return image
 
     def get_menu_items(self):
-        """Create the context menu for the tray icon."""
-        config = get_bootstrap_config()
-        is_configured = config.get('deployment_url') and config.get('auth_token')
+        """Create the context menu for the tray icon, announcing a config error the moment it appears."""
+        previous_error = str(self.config_error) if self.config_error else None
+        config = self._read_config()
+        if self.config_error and str(self.config_error) != previous_error:
+            self.report_config_error()
         
         menu_items = [
             pystray.MenuItem("ELITEA MCP Client", lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
         ]
         
-        if is_configured:
+        if config is None:
+            menu_items.append(pystray.MenuItem("Config File Has Errors", lambda: None, enabled=False))
+            if self.is_server_running:
+                menu_items.append(pystray.MenuItem("Stop MCP Server", self.stop_server))
+            menu_items.append(pystray.Menu.SEPARATOR)
+        elif config.get('deployment_url') and config.get('auth_token'):
             if not self.is_server_running:
                 # Show start options when server is not running
                 menu_items.extend([
@@ -220,6 +236,7 @@ class MCPTrayApp:
         menu_items.extend([
             pystray.MenuItem("Configuration", pystray.Menu(
                 pystray.MenuItem("Open Config File", self.open_config_file),
+                pystray.MenuItem("Validate Config", self.validate_config),
                 pystray.MenuItem("Open Config Folder", self.open_config_folder),
                 pystray.MenuItem("Bootstrap (Terminal)", self.bootstrap_config),
                 pystray.MenuItem("View Current Config", self.view_config),
@@ -241,6 +258,30 @@ class MCPTrayApp:
         ])
         
         return menu_items
+
+    def _read_config(self):
+        """Return the bootstrap config, or None with the error kept for the menu when the file cannot be parsed."""
+        try:
+            config = get_bootstrap_config()
+        except ConfigError as error:
+            self.config_error = error
+            return None
+        self.config_error = None
+        return config
+
+    def report_config_error(self):
+        """Log the full error with its source excerpt and notify its short form, which fits a notification."""
+        logger.error(str(self.config_error))
+        self.show_notification("Invalid Config", self.config_error.summary)
+
+    def validate_config(self, icon=None, item=None):
+        """Re-read the config file and report the result, bringing the server controls back once it is fixed."""
+        config = self._read_config()
+        self.update_menu()
+        if config is None:
+            self.report_config_error()
+        else:
+            self.show_notification("Config Valid", f"{get_config_file()} is valid.")
 
     def on_update_state_change(self, state):
         """Refresh the menu after a background check and announce a newly found release."""
@@ -325,7 +366,11 @@ class MCPTrayApp:
         if self.is_server_running:
             return
             
-        config = get_bootstrap_config()
+        config = self._read_config()
+        if config is None:
+            self.report_config_error()
+            self.update_menu()
+            return
         if not config.get('deployment_url') or not config.get('auth_token'):
             self.show_error("Configuration Required", 
                           "Please configure the client first using Bootstrap.")
@@ -346,6 +391,10 @@ class MCPTrayApp:
 
     def restart_server(self):
         """Restart the MCP server to reload configuration."""
+        if self._read_config() is None:
+            self.report_config_error()
+            self.update_menu()
+            return
         self.server_controller.restart_servers()
 
     def open_config_file(self, icon=None, item=None):
@@ -419,9 +468,12 @@ class MCPTrayApp:
 
     def view_config(self, icon=None, item=None):
         """Display current configuration via notification."""
+        config = self._read_config()
+        if config is None:
+            self.report_config_error()
+            self.update_menu()
+            return
         try:
-            config = get_bootstrap_config()
-            
             # Build configuration summary for notification
             config_lines = []
             
@@ -516,8 +568,8 @@ class MCPTrayApp:
         """Show native macOS notification using osascript."""
         try:
             # Escape quotes and special characters for AppleScript
-            safe_title = title.replace('"', '\\"').replace("'", "\\'")
-            safe_message = message.replace('"', '\\"').replace("'", "\\'").replace('\n', '\\n')
+            safe_title = title.replace('\\', '\\\\').replace('"', '\\"')
+            safe_message = message.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
             
             # Use osascript to show native macOS notification
             applescript = f'''
@@ -569,6 +621,8 @@ class MCPTrayApp:
     def _on_tray_ready(self, icon):
         """Show the icon, report a finished update and start the background update checks."""
         icon.visible = True
+        if self.config_error:
+            self.report_config_error()
         self.report_update_result()
         if self.update_checker:
             self.update_checker.start()

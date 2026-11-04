@@ -1,8 +1,11 @@
 import json
 import os
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 
+from .config_errors import ConfigError, ConfigMistake, EmptyConfigError, backup_file_for, parse_config
 from .utils.name import sanitize
 from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS
 from appdirs import user_config_dir
@@ -11,6 +14,7 @@ APP_NAME = "elitea-mcp-client"
 
 # Configure logger
 logger = logging.getLogger(__name__)
+
 
 def get_config_dir():
     """Return the configuration directory for the application."""
@@ -22,17 +26,17 @@ def get_config_file():
     """Return the path to the configuration file."""
     return get_config_dir() / "config.json"
 
-def load_config():
-    """Load configuration from the config file."""
-    config_file = get_config_file()
+def load_config(config_file=None):
+    """Load configuration from the config file, raising ConfigError when it cannot be parsed."""
+    config_file = config_file or get_config_file()
     if not hasattr(config_file, "exists"):
         from pathlib import Path
         config_file = Path(config_file)
     if not config_file.exists():
         return {}
     
-    with open(str(config_file), "r") as f:
-        config = json.load(f)
+    with open(str(config_file), "r", encoding="utf-8-sig") as f:
+        config = parse_config(read_config_text(f, config_file), config_file)
 
         servers = config.get("servers", {})
         sanitized_servers = {sanitize(name): value for name, value in servers.items()}
@@ -49,6 +53,22 @@ def load_config():
         
         return config
 
+def read_config_text(config_stream, config_file):
+    try:
+        return config_stream.read()
+    except UnicodeDecodeError:
+        raise ConfigError(config_file, "Config file is not UTF-8 text", "The file uses another text encoding",
+                          ConfigMistake.NOT_UTF8) from None
+
+
+def load_config_for_bootstrap():
+    """Load the config bootstrap writes back, starting over only from an empty file since it holds nothing to keep."""
+    try:
+        return load_config()
+    except EmptyConfigError:
+        return {}
+
+
 def is_ssl_verification_enabled(config):
     """Decide TLS verification for platform calls; the environment overrides the config, which defaults to off for corporate proxies."""
     env_setting = os.environ.get('ELITEA_DISABLE_SSL_VERIFY', '').lower()
@@ -57,13 +77,33 @@ def is_ssl_verification_enabled(config):
     return bool(config.get("ssl_verify", False))
 
 def save_config(config):
-    """Save configuration to the config file."""
-    with open(get_config_file(), "w") as f:
-        json.dump(config, f, indent=2)
+    """Replace the config file in one step so a failed write never leaves it partial, keeping the previous valid version as a backup."""
+    config_file = Path(str(get_config_file()))
+    backup_valid_config(config_file)
+    descriptor, temp_path = tempfile.mkstemp(dir=config_file.parent, prefix=f"{config_file.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, config_file)
+    except BaseException:
+        Path(temp_path).unlink(missing_ok=True)
+        raise
+
+
+def backup_valid_config(config_file):
+    if not config_file.exists():
+        return
+    try:
+        load_config(config_file)
+    except ConfigError:
+        return
+    shutil.copyfile(config_file, backup_file_for(config_file))
 
 def set_bootstrap_config(deployment_url, auth_token, host='0.0.0.0', port=8000):
     """Set bootstrap configuration values."""
-    config = load_config()
+    config = load_config_for_bootstrap()
     config["deployment_url"] = deployment_url
     config["auth_token"] = auth_token
     config["host"] = host
@@ -92,7 +132,7 @@ def interactive_bootstrap():
     Interactive bootstrap configuration by prompting user for values.
     Returns the updated configuration.
     """
-    config = load_config()
+    config = load_config_for_bootstrap()
     current_url = config.get("deployment_url", "")
     current_token = config.get("auth_token", "")
     current_host = config.get("host", "0.0.0.0")

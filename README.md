@@ -200,6 +200,7 @@ Right-click the tray icon to access:
 
 #### Configuration
 - **Open Config File** - Edit JSON configuration in default text editor
+- **Validate Config** - Re-check the config file and report the line, column and fix hint of a JSON error; while the file is broken the tray stays up with only the config tools, then Start returns once it validates
 - **Open Config Folder** - Open configuration directory in file manager
 - **Bootstrap (Terminal)** - Run interactive configuration setup
 - **View Current Config** - Display current settings via system notification
@@ -248,6 +249,7 @@ elitea-mcp bootstrap                 # Configure deployment URL and auth token
 elitea-mcp run                       # Run MCP client with specific project/app
 elitea-mcp serve                     # Start MCP servers in background
 elitea-mcp tray                      # Launch system tray application
+elitea-mcp validate                  # Check the config file is valid JSON (exit 0) or print the error (exit 1); --config <path> checks another file
 ```
 
 ### Running MCP Client

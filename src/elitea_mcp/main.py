@@ -9,10 +9,13 @@ from pathlib import Path
 from elitea_mcp.commands.bootstrap_servers import bootstrap_servers
 from elitea_mcp.commands.run_servers import run_servers
 
+from .config_errors import ConfigError
 from .config import (
     set_bootstrap_config,
     get_bootstrap_config,
+    get_config_file,
     interactive_bootstrap,
+    load_config,
 )
 from .clients.elitea import Agent, Agents, ApiDetailsRequestError
 from .server.mcp import run
@@ -405,7 +408,29 @@ def bootstrap(deployment_url=None, auth_token=None, host='0.0.0.0', port=8000):
     if config["deployment_url"]:
         bootstrap_servers(config)
 
+def validate(config_file=None):
+    """Exit 0 when the config file loads and 1 with the readable error when it does not, so scripts can gate on it."""
+    config_file = Path(config_file).resolve() if config_file else get_config_file()
+    if not config_file.exists():
+        print(f"Config file not found: {config_file}\nHint: run elitea-mcp bootstrap to create it.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        load_config(config_file)
+    except ConfigError as error:
+        print(error, file=sys.stderr)
+        sys.exit(1)
+    print(f"Config file is valid: {config_file}")
+
+
 def cli():
+    try:
+        run_cli()
+    except ConfigError as error:
+        print(error, file=sys.stderr)
+        sys.exit(1)
+
+
+def run_cli():
     parser = argparse.ArgumentParser(description='MCP Client')
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
     
@@ -438,10 +463,15 @@ def cli():
     tray_parser.add_argument('--daemon', action='store_true', help='Run in daemon mode (background)')
     tray_parser.add_argument('--pid-file', type=str, help='PID file location for daemon mode')
     tray_parser.add_argument('--log-file', type=str, help='Log file location for daemon mode')
+
+    validate_parser = subparsers.add_parser("validate", help="Check that the config file is valid JSON; exits non-zero when it is not")
+    validate_parser.add_argument('--config', type=str, help='Config file to check (defaults to the client config file)')
     
     args = parser.parse_args()
     
-    if args.command == "bootstrap":
+    if args.command == "validate":
+        validate(args.config)
+    elif args.command == "bootstrap":
         bootstrap(
             deployment_url=args.deployment_url if hasattr(args, 'deployment_url') else None,
             auth_token=args.auth_token if hasattr(args, 'auth_token') else None,

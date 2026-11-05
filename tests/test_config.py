@@ -2,6 +2,7 @@ import json
 import pytest
 from pathlib import Path
 from unittest.mock import patch, mock_open, MagicMock, call
+from src.elitea_mcp.config_errors import ConfigError
 from src.elitea_mcp.config import (
     load_config, save_config, set_bootstrap_config, get_bootstrap_config,
     get_config_dir, get_config_file, interactive_bootstrap, APP_NAME
@@ -22,14 +23,11 @@ def test_load_config(mock_get_config_file, mock_open_file):
     config = load_config()
     assert config == {"key": "value"}
 
-@patch("src.elitea_mcp.config.open", new_callable=mock_open)
-@patch("src.elitea_mcp.config.get_config_file")
-def test_save_config(mock_get_config_file, mock_open_file):
-    mock_get_config_file.return_value = "config.json"
+def test_save_config(monkeypatch, tmp_path):
+    config_file = tmp_path / "config.json"
+    monkeypatch.setattr("src.elitea_mcp.config.get_config_file", lambda: config_file)
     save_config({"key": "value"})
-    mock_open_file.assert_called_once_with("config.json", "w")
-    written = "".join(call.args[0] for call in mock_open_file().write.call_args_list)
-    assert written == '{\n  "key": "value"\n}'
+    assert config_file.read_text() == '{\n  "key": "value"\n}'
 
 @patch("src.elitea_mcp.config.load_config", return_value={})
 @patch("src.elitea_mcp.config.save_config")
@@ -168,18 +166,16 @@ def test_interactive_bootstrap_no_values(mock_load_config, mock_set_bootstrap, m
     # Verify the result is the empty config
     assert result == {}
 
-@patch("src.elitea_mcp.config.open", side_effect=IOError("Permission denied"))
-@patch("src.elitea_mcp.config.get_config_file")
-def test_save_config_io_error(mock_get_config_file, mock_open_file):
+@patch("src.elitea_mcp.config.os.replace", side_effect=IOError("Permission denied"))
+def test_save_config_io_error(mock_replace, monkeypatch, tmp_path):
     """Test save_config handling of IO errors."""
-    mock_get_config_file.return_value = "config.json"
+    monkeypatch.setattr("src.elitea_mcp.config.get_config_file", lambda: tmp_path / "config.json")
     with pytest.raises(IOError, match="Permission denied"):
         save_config({"key": "value"})
 
 @patch("src.elitea_mcp.config.open", new_callable=mock_open, read_data="invalid json")
-@patch("src.elitea_mcp.config.json.load", side_effect=json.JSONDecodeError("Invalid JSON", "", 0))
 @patch("src.elitea_mcp.config.get_config_file")
-def test_load_config_json_error(mock_get_config_file, mock_json_load, mock_open_file):
+def test_load_config_json_error(mock_get_config_file, mock_open_file):
     """Test load_config handling of invalid JSON."""
     # Set up a file that exists but has invalid JSON
     class FakePath:
@@ -189,7 +185,5 @@ def test_load_config_json_error(mock_get_config_file, mock_json_load, mock_open_
             return "config.json"
     mock_get_config_file.return_value = FakePath()
     
-    # When JSON is invalid, json.load will raise JSONDecodeError
-    # Let's verify that the function propagates this exception
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(ConfigError, match="line 1, column 1: Expecting value"):
         load_config()

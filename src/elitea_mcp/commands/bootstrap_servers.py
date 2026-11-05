@@ -6,7 +6,7 @@ from ..utils.name import sanitize
 
 
 def bootstrap_servers(config):
-    project_id = _prompt_int("Enter Project ID if you need to add any mcp servers (or press Enter to skip): ")
+    project_id = _prompt_int_or_empty("Enter Project ID if you need to add any mcp servers (or press Enter to skip): ")
     #
     if not project_id:
         return
@@ -14,10 +14,16 @@ def bootstrap_servers(config):
     config = load_config()
     config["project_id"] = project_id
     #
-    config["servers"] = _servers_flow()
+    config["servers"] = {**_existing_servers(config), **_servers_flow()}
     #
     save_config(config)
     print(f"Servers saved to {get_config_file()}")
+
+
+def _existing_servers(config):
+    """Keep the servers already configured, so running bootstrap again only adds or replaces the ones entered now."""
+    servers = config.get("servers")
+    return servers if isinstance(servers, dict) else {}
 
 
 def _prompt_url(prompt):

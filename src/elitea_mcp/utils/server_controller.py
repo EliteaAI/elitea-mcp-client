@@ -24,6 +24,7 @@ if platform.system() == "Darwin":
         pass
 
 from ..config import load_config
+from ..config_model import check_config, write_config_schema
 from ..utils.preflight import PreflightError, validate_platform_config
 from ..utils.sio import PlatformConnectionError, start_socket_connection, get_all_tools
 
@@ -41,6 +42,7 @@ class ServerController:
         self.status_callback: Optional[Callable[[str], None]] = None
         self.error_callback: Optional[Callable[[str], None]] = None
         self.daemon_mode = False
+        self.config = None
         
     def set_status_callback(self, callback: Callable[[str], None]):
         """Set callback for status updates."""
@@ -69,13 +71,17 @@ class ServerController:
         if self.is_running:
             return True
             
-        config = load_config()
-        servers = config.get("servers", {})
-        
-        if not servers:
-            self._notify_error("No servers configured. Please bootstrap servers first.")
+        report = check_config(load_config())
+        write_config_schema()
+        if report.config is None:
+            self._notify_error(report.summary)
             return False
-            
+        if not report.config["servers"]:
+            self._notify_error(report.summary if report.skipped_servers else "No servers configured. Please bootstrap servers first.")
+            return False
+        if report.skipped_servers:
+            self._notify_error(report.skipped_summary(len(report.config["servers"]) + len(report.skipped_servers)))
+        self.config = report.config
         self.daemon_mode = daemon_mode
         
         if daemon_mode:
@@ -168,7 +174,7 @@ class ServerController:
                 self.is_running = True
                 self._notify_status("Starting MCP servers...")
                 
-                config = validate_platform_config(load_config(), self._notify_status)
+                config = validate_platform_config(self.config, self._notify_status)
                 servers = config.get("servers", {})
                 all_tools = asyncio.run(get_all_tools(servers))
                 

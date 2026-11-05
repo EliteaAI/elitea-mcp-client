@@ -2,14 +2,21 @@ import asyncio
 import sys
 
 from ..config import load_config
+from ..config_model import check_config, write_config_schema
 from ..utils.menu import show_menu
 from ..utils.preflight import PreflightError, validate_platform_config
 from ..utils.sio import PlatformConnectionError, start_socket_connection, get_all_tools
 
 
 def run_servers():
+    report = check_config(load_config())
+    write_config_schema()
+    if report.notable:
+        print(report, file=sys.stderr)
+    if report.config is None:
+        sys.exit(1)
     try:
-        config = validate_platform_config(load_config())
+        config = validate_platform_config(report.config)
     except PreflightError as error:
         print(f"Cannot connect to platform: {error}")
         sys.exit(1)

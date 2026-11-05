@@ -1,5 +1,6 @@
 import json
 import re
+from collections import Counter
 from enum import Enum
 from pathlib import Path
 
@@ -66,6 +67,18 @@ class ConfigError(Exception):
         return "\n".join(lines)
 
 
+class JsonObject(dict):
+    """A JSON object that remembers the keys its text repeats, because json keeps only the last value of each."""
+    duplicate_keys = ()
+
+
+def object_keeping_duplicates(pairs):
+    obj = JsonObject(pairs)
+    if len(obj) < len(pairs):
+        obj.duplicate_keys = tuple(key for key, count in Counter(key for key, _ in pairs).items() if count > 1)
+    return obj
+
+
 def backup_file_for(config_file):
     config_file = Path(str(config_file))
     return config_file.with_name(config_file.name + ".bak")
@@ -77,7 +90,7 @@ def parse_config(text, config_file):
         raise ConfigError(config_file, "Config file is not valid JSON", "The file is empty",
                           ConfigMistake.EMPTY_FILE, line=1, column=1)
     try:
-        config = json.loads(text)
+        config = json.loads(text, object_pairs_hook=object_keeping_duplicates)
     except json.JSONDecodeError as error:
         position, reason, mistake = locate_json_mistake(error)
         line = text.count("\n", 0, position) + 1

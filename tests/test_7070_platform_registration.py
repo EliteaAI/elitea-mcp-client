@@ -167,8 +167,9 @@ def test_unreachable_platform_fails_after_bounded_attempts():
 @patch("src.elitea_mcp.utils.server_controller.start_socket_connection")
 @patch("src.elitea_mcp.utils.server_controller.get_all_tools")
 @patch("src.elitea_mcp.utils.server_controller.validate_platform_config", side_effect=PreflightError("Authentication failed: the token is invalid or expired."))
-@patch("src.elitea_mcp.utils.server_controller.load_config", return_value={"servers": {"github": {}}})
-def test_tray_start_reports_the_preflight_failure_and_never_opens_a_socket(mock_load_config, mock_validate, mock_get_all_tools, mock_start_socket):
+@patch("src.elitea_mcp.utils.server_controller.write_config_schema")
+@patch("src.elitea_mcp.utils.server_controller.load_config", return_value={"servers": {"github": {"command": "npx"}}})
+def test_tray_start_reports_the_preflight_failure_and_never_opens_a_socket(mock_load_config, mock_write_schema, mock_validate, mock_get_all_tools, mock_start_socket):
     controller = ServerController()
     controller.set_status_callback(MagicMock())
     controller.set_error_callback(MagicMock())
@@ -184,8 +185,9 @@ def test_tray_start_reports_the_preflight_failure_and_never_opens_a_socket(mock_
 
 @patch("src.elitea_mcp.commands.run_servers.start_socket_connection")
 @patch("src.elitea_mcp.commands.run_servers.validate_platform_config", side_effect=PreflightError('"project_id" is not set.'))
-@patch("src.elitea_mcp.commands.run_servers.load_config", return_value={"servers": {"github": {}}})
-def test_serve_exits_with_the_preflight_message(mock_load_config, mock_validate, mock_start_socket, capsys):
+@patch("src.elitea_mcp.commands.run_servers.write_config_schema")
+@patch("src.elitea_mcp.commands.run_servers.load_config", return_value={"servers": {"github": {"command": "npx"}}})
+def test_serve_exits_with_the_preflight_message(mock_load_config, mock_write_schema, mock_validate, mock_start_socket, capsys):
     with pytest.raises(SystemExit) as exit_info:
         run_servers()
 

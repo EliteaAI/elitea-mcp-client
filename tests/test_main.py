@@ -86,8 +86,9 @@ class TestMain(unittest.TestCase):
             mock_agent_class.assert_not_called()
             mock_agents_class.assert_not_called()
 
+    @patch("src.elitea_mcp.main.write_config_schema")
     @patch("src.elitea_mcp.main.interactive_bootstrap", return_value={"deployment_url": "http://example.com", "auth_token": "token"})
-    def test_bootstrap_interactive(self, mock_interactive):
+    def test_bootstrap_interactive(self, mock_interactive, mock_write_schema):
         test_args = ["main", "bootstrap"]
         with patch.object(sys, "argv", test_args):
             captured_output = StringIO()
@@ -97,9 +98,10 @@ class TestMain(unittest.TestCase):
             self.assertIn("Deployment URL:", output)
             self.assertIn("Auth Token: ********", output)
 
+    @patch("src.elitea_mcp.main.write_config_schema")
     @patch("src.elitea_mcp.main.set_bootstrap_config", 
            return_value={"deployment_url": "http://custom.com", "auth_token": "custom-token"})
-    def test_bootstrap_non_interactive(self, mock_set_config):
+    def test_bootstrap_non_interactive(self, mock_set_config, mock_write_schema):
         test_args = ["main", "bootstrap", "--deployment_url", "http://custom.com", 
                      "--auth_token", "custom-token", "--host", "127.0.0.1", "--port", "9000"]
         with patch.object(sys, "argv", test_args):

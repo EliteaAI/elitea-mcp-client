@@ -17,6 +17,7 @@ from .config import (
     interactive_bootstrap,
     load_config,
 )
+from .config_model import check_config, write_config_schema
 from .clients.elitea import Agent, Agents, ApiDetailsRequestError
 from .server.mcp import run
 from .utils.preflight import PreflightError, validate_platform_config
@@ -146,6 +147,10 @@ def main(project_id=None, application_id=None, version_id=None, transport="stdio
         if not deployment_url or not auth_token:
             logger.error("Configuration missing. Please provide --deployment_url and --auth_token arguments or run bootstrap first.")
             return
+        if transport.lower() == "sse":
+            port = config_port(port)
+            if port is None:
+                return
     
     if not project_id:
         logger.error("Project ID is required")
@@ -191,6 +196,17 @@ def main(project_id=None, application_id=None, version_id=None, transport="stdio
     else:
         logger.info("Using all available project agents")
     run(client, transport=transport, host=host, port=port)
+
+def config_port(value):
+    """Return the configured port as a number, or None after logging why it cannot be listened on."""
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        port = 0
+    if not 1 <= port <= 65535:
+        logger.error(f'"port" in config must be a number from 1 to 65535, got "{value}".')
+        return None
+    return port
 
 def macos_gui_daemonize(pid_file=None, log_file=None):
     """
@@ -407,17 +423,23 @@ def bootstrap(deployment_url=None, auth_token=None, host='0.0.0.0', port=8000):
     
     if config["deployment_url"]:
         bootstrap_servers(config)
+    write_config_schema()
 
 def validate(config_file=None):
-    """Exit 0 when the config file loads and 1 with the readable error when it does not, so scripts can gate on it."""
+    """Print every problem in the config file; exit 1 when any is an error, so scripts can gate on it."""
     config_file = Path(config_file).resolve() if config_file else get_config_file()
     if not config_file.exists():
         print(f"Config file not found: {config_file}\nHint: run elitea-mcp bootstrap to create it.", file=sys.stderr)
         sys.exit(1)
     try:
-        load_config(config_file)
+        report = check_config(load_config(config_file))
     except ConfigError as error:
         print(error, file=sys.stderr)
+        sys.exit(1)
+    write_config_schema()
+    if report.problems:
+        print(f"{config_file}:\n{report.describe(include_info=True)}", file=sys.stderr)
+    if report.errors:
         sys.exit(1)
     print(f"Config file is valid: {config_file}")
 
@@ -464,7 +486,7 @@ def run_cli():
     tray_parser.add_argument('--pid-file', type=str, help='PID file location for daemon mode')
     tray_parser.add_argument('--log-file', type=str, help='Log file location for daemon mode')
 
-    validate_parser = subparsers.add_parser("validate", help="Check that the config file is valid JSON; exits non-zero when it is not")
+    validate_parser = subparsers.add_parser("validate", help="Check the config file and list every problem; exits non-zero when any is an error")
     validate_parser.add_argument('--config', type=str, help='Config file to check (defaults to the client config file)')
     
     args = parser.parse_args()

@@ -6,11 +6,12 @@ import tempfile
 from pathlib import Path
 
 from .config_errors import ConfigError, ConfigMistake, backup_file_for, parse_config
-from .utils.name import sanitize
 from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS
 from appdirs import user_config_dir
 
 APP_NAME = "elitea-mcp-client"
+SCHEMA_FILE_NAME = "config.schema.json"
+SCHEMA_REFERENCE = f"./{SCHEMA_FILE_NAME}"
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ def get_config_file():
     return get_config_dir() / "config.json"
 
 def load_config(config_file=None):
-    """Load configuration from the config file, raising ConfigError when it cannot be parsed."""
+    """Load the config exactly as written, raising ConfigError when it cannot be parsed; config_model.check_config resolves it."""
     config_file = config_file or get_config_file()
     if not hasattr(config_file, "exists"):
         from pathlib import Path
@@ -36,22 +37,7 @@ def load_config(config_file=None):
         return {}
     
     with open(str(config_file), "r", encoding="utf-8-sig") as f:
-        config = parse_config(read_config_text(f, config_file), config_file)
-
-        servers = config.get("servers", {})
-        sanitized_servers = {sanitize(name): value for name, value in servers.items()}
-        config["servers"] = sanitized_servers
-
-        try:
-            config['timeout'] = int(config.get('timeout', 30))
-        except (ValueError, TypeError):
-            config['timeout'] = 30
-        
-        # Set default SSL configuration for corporate environments
-        if 'ssl_verify' not in config:
-            config['ssl_verify'] = False
-        
-        return config
+        return parse_config(read_config_text(f, config_file), config_file)
 
 def read_config_text(config_stream, config_file):
     try:
@@ -72,13 +58,18 @@ def save_config(config):
     """Replace the config file in one step so a failed write never leaves it partial, keeping the previous valid version as a backup."""
     config_file = Path(str(get_config_file()))
     backup_valid_config(config_file)
-    descriptor, temp_path = tempfile.mkstemp(dir=config_file.parent, prefix=f"{config_file.name}.", suffix=".tmp")
+    replace_file(config_file, json.dumps(config, indent=2))
+
+
+def replace_file(path, text):
+    """Write text to path through a temporary file and one rename, so readers never see a partial file."""
+    descriptor, temp_path = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
+            f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(temp_path, config_file)
+        os.replace(temp_path, path)
     except BaseException:
         Path(temp_path).unlink(missing_ok=True)
         raise
@@ -95,7 +86,7 @@ def backup_valid_config(config_file):
 
 def set_bootstrap_config(deployment_url, auth_token, host='0.0.0.0', port=8000):
     """Set bootstrap configuration values."""
-    config = load_config()
+    config = load_config() if get_config_file().exists() else {"$schema": SCHEMA_REFERENCE}
     config["deployment_url"] = deployment_url
     config["auth_token"] = auth_token
     config["host"] = host
@@ -103,9 +94,9 @@ def set_bootstrap_config(deployment_url, auth_token, host='0.0.0.0', port=8000):
     save_config(config)
     return config
 
-def get_bootstrap_config():
-    """Get bootstrap configuration values."""
-    config = load_config()
+def get_bootstrap_config(config=None):
+    """Get bootstrap configuration values, from the given parsed config or from the file."""
+    config = load_config() if config is None else config
     
     return {
         "deployment_url": config.get("deployment_url"),
@@ -118,6 +109,15 @@ def get_bootstrap_config():
         "update_check": config.get("update_check", True),
         "update_check_interval_hours": config.get("update_check_interval_hours", DEFAULT_CHECK_INTERVAL_HOURS),
     }
+
+def read_port(current_port):
+    """Ask for the port and keep it a number, so the saved config holds 8080 and not "8080"."""
+    typed = input(f"Port (default: {current_port}): ").strip()
+    if typed.isdigit():
+        return int(typed)
+    if typed:
+        print(f'"{typed}" is not a port number; keeping {current_port}.')
+    return current_port
 
 def interactive_bootstrap():
     """
@@ -142,7 +142,7 @@ def interactive_bootstrap():
     new_url = input(f"Deployment URL: ")
     new_token = input(f"Authentication token: ")
     new_host = input(f"Host (default: {current_host}): ") or current_host
-    new_port = input(f"Port (default: {current_port}): ") or current_port
+    new_port = read_port(current_port)
     
     # Use new values or keep existing ones if input was empty
     deployment_url = new_url if new_url else current_url

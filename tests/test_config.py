@@ -122,7 +122,7 @@ def test_interactive_bootstrap_new_values(mock_load_config, mock_set_bootstrap, 
     result = interactive_bootstrap()
     
     # Verify set_bootstrap_config was called with correct arguments
-    mock_set_bootstrap.assert_called_once_with("http://new.example.com", "new_token", "127.0.0.1", "9000")
+    mock_set_bootstrap.assert_called_once_with("http://new.example.com", "new_token", "127.0.0.1", 9000)
     # Verify the result is what set_bootstrap_config returned
     assert result == {"deployment_url": "http://new.example.com", "auth_token": "new_token", 
                      "host": "127.0.0.1", "port": "9000"}

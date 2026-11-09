@@ -8,7 +8,7 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
-from ..config import load_config
+from ..config_model import DEFAULT_TIMEOUT
 from .tool_result import render_tool_result
 
 
@@ -21,6 +21,7 @@ class SessionManager:
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
         self._loop_running = threading.Event()
+        self.timeout = DEFAULT_TIMEOUT
         # Register cleanup on exit
         atexit.register(self.cleanup_all)
     
@@ -54,9 +55,8 @@ class SessionManager:
         if self._event_loop is None:
             raise RuntimeError("Event loop not available")
         
-        config = load_config()
         future = asyncio.run_coroutine_threadsafe(coro, self._event_loop)
-        return future.result(timeout=config['timeout'])
+        return future.result(timeout=self.timeout)
     
     def get_session_sync(self, server_name: str, server_conf: dict) -> ClientSession:
         """Synchronous wrapper for get_session."""

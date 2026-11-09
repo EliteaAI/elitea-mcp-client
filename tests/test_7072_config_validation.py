@@ -11,7 +11,7 @@ from src.elitea_mcp import tray as tray_module
 from src.elitea_mcp.config import load_config, save_config, set_bootstrap_config
 from src.elitea_mcp.config_errors import ConfigError, ConfigMistake, locate_json_mistake
 
-VALID_CONFIG = {"deployment_url": "https://elitea.example.com", "auth_token": "token", "servers": {"fs": {}}}
+VALID_CONFIG = {"deployment_url": "https://elitea.example.com", "auth_token": "token", "servers": {"fs": {"command": "npx"}}}
 
 
 @pytest.fixture

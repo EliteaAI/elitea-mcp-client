@@ -200,7 +200,7 @@ Right-click the tray icon to access:
 
 #### Configuration
 - **Open Config File** - Edit JSON configuration in default text editor
-- **Validate Config** - Re-check the config file and report the line, column and fix hint of a JSON error; while the file is broken the tray stays up with only the config tools, then Start returns once it validates
+- **Validate Config** - Re-check the config file: a JSON error is reported with its line, column and fix hint, and every other problem with its path (for example `servers.github.args`) and what to change. While a problem stops the client the tray stays up with only the config tools, then Start returns once it validates. A server whose config cannot work is skipped at Start and the others run
 - **Open Config Folder** - Open configuration directory in file manager
 - **Bootstrap (Terminal)** - Run interactive configuration setup
 - **View Current Config** - Display current settings via system notification
@@ -249,7 +249,7 @@ elitea-mcp bootstrap                 # Configure deployment URL and auth token
 elitea-mcp run                       # Run MCP client with specific project/app
 elitea-mcp serve                     # Start MCP servers in background
 elitea-mcp tray                      # Launch system tray application
-elitea-mcp validate                  # Check the config file is valid JSON (exit 0) or print the error (exit 1); --config <path> checks another file
+elitea-mcp validate                  # List every problem in the config file; exit 1 when any is an error, 0 otherwise; --config <path> checks another file
 ```
 
 ### Running MCP Client
@@ -334,8 +334,10 @@ elitea-mcp bootstrap \
 
 ```json
 {
+  "$schema": "./config.schema.json",
   "deployment_url": "https://api.example.com",
   "auth_token": "your-auth-token",
+  "project_id": 123,
   "host": "0.0.0.0",
   "port": 8000,
   "servers": {
@@ -344,10 +346,19 @@ elitea-mcp bootstrap \
       "args": ["-m", "mcp_server"],
       "env": {},
       "stateful": false
+    },
+    "remote_server": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": {"Authorization": "Bearer your-token"}
     }
   }
 }
 ```
+
+- A server without `type` is a local `stdio` server. A remote server needs `"type": "http"` (Streamable HTTP) or `"type": "sse"`; `headers` is optional.
+- Snippets written for other MCP clients often use `mcpServers` instead of `servers`; the client reads it when `servers` is missing, but rename it to `servers`.
+- `"$schema"` gives autocompletion and inline checks in editors that read JSON Schema (VS Code, JetBrains). The client writes `config.schema.json` for its installed version next to `config.json`.
 
 ## 🔄 Server Management
 

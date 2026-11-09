@@ -72,10 +72,11 @@ def stop_server():
 @patch("src.elitea_mcp.utils.server_controller.validate_platform_config", side_effect=lambda config, notify: config)
 @patch("src.elitea_mcp.utils.server_controller.get_all_tools")
 @patch("src.elitea_mcp.utils.server_controller.load_config")
-def test_events_for_start_servers(mock_load_config, mock_get_all_tools, mock_validate_platform_config):
+@patch("src.elitea_mcp.utils.server_controller.write_config_schema")
+def test_events_for_start_servers(mock_write_schema, mock_load_config, mock_get_all_tools, mock_validate_platform_config):
     start_server()
     mock_load_config.return_value = {
-        "deployment_url": "http://localhost:5002", "auth_token": "any_token", "host": "0.0.0.0", "port": 8000, "servers": {"mcp_1": {"name": "mcp_server_1"}}, "project_id": 123, "timeout": 30
+        "deployment_url": "http://localhost:5002", "auth_token": "any_token", "host": "0.0.0.0", "port": 8000, "servers": {"mcp_1": {"command": "npx"}}, "project_id": 123, "timeout": 30
     }
     mock_get_all_tools.return_value = [{
         'name': 'mcp_server_1', 'tools': [{'annotations': None, 'description': 'descr', 'inputSchema': {'properties': {'task': {}}, 'required': ['task'], 'type': 'object'}, 'meta': None, 'name': 'ant_te_st-__2345', 'outputSchema': None, 'title': None}]

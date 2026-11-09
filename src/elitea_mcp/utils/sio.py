@@ -117,6 +117,7 @@ def start_socket_connection(config, all_tools, notify_status: Callable[[str], No
         print("SSL verification disabled for SocketIO connection")
 
     registration = {"done": False}
+    get_session_manager().timeout = config['timeout']
 
     def register_on_platform():
         """Register the local MCP servers and report the platform's answer, raising when it refuses them."""

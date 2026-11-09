@@ -108,9 +108,10 @@ class TestMain(unittest.TestCase):
             output = log.output
             self.assertIn("Project ID is required", output)
 
-    @patch("src.elitea_mcp.commands.bootstrap_servers.bootstrap_servers")
+    @patch("src.elitea_mcp.main.write_config_schema")
+    @patch("src.elitea_mcp.main.bootstrap_servers")
     @patch("src.elitea_mcp.main.interactive_bootstrap", return_value={"deployment_url": "http://example.com", "auth_token": "token"})
-    def test_bootstrap_interactive(self, mock_interactive, mock_bootstrap_servers):
+    def test_bootstrap_interactive(self, mock_interactive, mock_bootstrap_servers, mock_write_schema):
         test_args = ["main", "bootstrap"]
         with patch.object(sys, "argv", test_args):
             with LogCapture() as log:
@@ -121,10 +122,11 @@ class TestMain(unittest.TestCase):
             self.assertIn("Deployment URL: http://example.com", output)
             mock_bootstrap_servers.assert_called_once_with({"deployment_url": "http://example.com", "auth_token": "token"})
 
-    @patch("src.elitea_mcp.commands.bootstrap_servers.bootstrap_servers")
+    @patch("src.elitea_mcp.main.write_config_schema")
+    @patch("src.elitea_mcp.main.bootstrap_servers")
     @patch("src.elitea_mcp.main.set_bootstrap_config",
            return_value={"deployment_url": "http://custom.com", "auth_token": "custom-token"})
-    def test_bootstrap_non_interactive(self, mock_set_config, mock_bootstrap_servers):
+    def test_bootstrap_non_interactive(self, mock_set_config, mock_bootstrap_servers, mock_write_schema):
         test_args = ["main", "bootstrap", "--deployment_url", "http://custom.com",
                      "--auth_token", "custom-token", "--host", "127.0.0.1", "--port", "9000"]
         with patch.object(sys, "argv", test_args):

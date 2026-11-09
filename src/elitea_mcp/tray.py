@@ -3,6 +3,7 @@
 System tray application for EliteA MCP Client.
 Provides easy access to configuration and server management.
 """
+import json
 import os
 import sys
 import threading
@@ -29,7 +30,9 @@ if platform.system() == "Darwin":
 import pystray
 from PIL import Image, ImageDraw
 from .config_errors import ConfigError
-from .config import get_bootstrap_config, set_bootstrap_config, interactive_bootstrap, get_config_file
+from .config import (SCHEMA_REFERENCE, get_bootstrap_config, set_bootstrap_config, interactive_bootstrap,
+                     get_config_file, load_config)
+from .config_model import check_config, write_config_schema
 from .utils.server_controller import get_server_controller
 from .main import main, setup_file_logger, get_default_paths
 from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS, UpdateChecker, get_installed_version
@@ -53,7 +56,10 @@ class MCPTrayApp:
         self.server_controller = get_server_controller()
         self.is_server_running = False
         self.config_error = None
-        config = self._read_config()
+        self.config_report = None
+        self.settings = None
+        self._read_config()
+        config = self.settings
         self.update_checker = (
             UpdateChecker(self.on_update_state_change,
                           config.get("update_check_interval_hours", DEFAULT_CHECK_INTERVAL_HOURS))
@@ -214,6 +220,11 @@ class MCPTrayApp:
             pystray.MenuItem("ELITEA MCP Client", lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
         ]
+        problem_count = len(self.config_report.notable) if config is not None else 0
+        if problem_count:
+            plural = "s" if problem_count > 1 else ""
+            menu_items.append(pystray.MenuItem(f"Config has {problem_count} problem{plural} (Validate Config to see)",
+                                               lambda: None, enabled=False))
         
         if config is None:
             menu_items.append(pystray.MenuItem("Config File Has Errors", lambda: None, enabled=False))
@@ -260,14 +271,16 @@ class MCPTrayApp:
         return menu_items
 
     def _read_config(self):
-        """Return the bootstrap config, or None with the error kept for the menu when the file cannot be parsed."""
+        """Return the bootstrap config, or None with the error kept for the menu when the file cannot be parsed or a problem stops the client."""
         try:
-            config = get_bootstrap_config()
+            raw = load_config()
         except ConfigError as error:
-            self.config_error = error
+            self.config_error, self.config_report, self.settings = error, None, None
             return None
-        self.config_error = None
-        return config
+        self.config_report = check_config(raw)
+        self.settings = get_bootstrap_config(raw)
+        self.config_error = self.config_report if self.config_report.config is None else None
+        return None if self.config_error else self.settings
 
     def report_config_error(self):
         """Log the full error with its source excerpt and notify its short form, which fits a notification."""
@@ -278,8 +291,12 @@ class MCPTrayApp:
         """Re-read the config file and report the result, bringing the server controls back once it is fixed."""
         config = self._read_config()
         self.update_menu()
+        write_config_schema()
         if config is None:
             self.report_config_error()
+        elif self.config_report.notable:
+            logger.warning(str(self.config_report))
+            self.show_notification("Config Has Problems", self.config_report.summary)
         else:
             self.show_notification("Config Valid", f"{get_config_file()} is valid.")
 
@@ -405,7 +422,8 @@ class MCPTrayApp:
         if not config_file.exists():
             # Create an empty config file
             config_file.parent.mkdir(parents=True, exist_ok=True)
-            config_file.write_text('{}')
+            config_file.write_text(json.dumps({"$schema": SCHEMA_REFERENCE}, indent=2))
+            write_config_schema()
             logger.info(f"Created config file: {config_file}")
         
         self._open_file(config_file)

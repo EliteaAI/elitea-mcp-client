@@ -58,10 +58,10 @@ def save_config(config):
     """Replace the config file in one step so a failed write never leaves it partial, keeping the previous valid version as a backup."""
     config_file = Path(str(get_config_file()))
     backup_valid_config(config_file)
-    replace_file(config_file, json.dumps(config, indent=2))
+    write_file_atomically(config_file, json.dumps(config, indent=2))
 
 
-def replace_file(path, text):
+def write_file_atomically(path, text):
     """Write text to path through a temporary file and one rename, so readers never see a partial file."""
     descriptor, temp_path = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
     try:
@@ -110,7 +110,7 @@ def get_bootstrap_config(config=None):
         "update_check_interval_hours": config.get("update_check_interval_hours", DEFAULT_CHECK_INTERVAL_HOURS),
     }
 
-def read_port(current_port):
+def prompt_for_port(current_port):
     """Ask for the port and keep it a number, so the saved config holds 8080 and not "8080"."""
     typed = input(f"Port (default: {current_port}): ").strip()
     if typed.isdigit():
@@ -142,7 +142,7 @@ def interactive_bootstrap():
     new_url = input(f"Deployment URL: ")
     new_token = input(f"Authentication token: ")
     new_host = input(f"Host (default: {current_host}): ") or current_host
-    new_port = read_port(current_port)
+    new_port = prompt_for_port(current_port)
     
     # Use new values or keep existing ones if input was empty
     deployment_url = new_url if new_url else current_url

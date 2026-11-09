@@ -16,13 +16,13 @@ def bootstrap_servers(config):
     #
     if not config.get("servers") and isinstance(config.get("mcpServers"), dict):
         config["servers"] = config.pop("mcpServers")
-    config["servers"] = {**_existing_servers(config), **_servers_flow()}
+    config["servers"] = {**_read_existing_servers(config), **_servers_flow()}
     #
     save_config(config)
     print(f"Servers saved to {get_config_file()}")
 
 
-def _existing_servers(config):
+def _read_existing_servers(config):
     """Keep the servers already configured, so running bootstrap again only adds or replaces the ones entered now."""
     servers = config.get("servers")
     return servers if isinstance(servers, dict) else {}

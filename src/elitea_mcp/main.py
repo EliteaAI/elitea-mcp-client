@@ -148,7 +148,7 @@ def main(project_id=None, application_id=None, version_id=None, transport="stdio
             logger.error("Configuration missing. Please provide --deployment_url and --auth_token arguments or run bootstrap first.")
             return
         if transport.lower() == "sse":
-            port = config_port(port)
+            port = parse_config_port(port)
             if port is None:
                 return
     
@@ -197,7 +197,7 @@ def main(project_id=None, application_id=None, version_id=None, transport="stdio
         logger.info("Using all available project agents")
     run(client, transport=transport, host=host, port=port)
 
-def config_port(value):
+def parse_config_port(value):
     """Return the configured port as a number, or None after logging why it cannot be listened on."""
     try:
         port = int(value)
@@ -438,7 +438,7 @@ def validate(config_file=None):
         sys.exit(1)
     write_config_schema()
     if report.problems:
-        print(f"{config_file}:\n{report.describe(include_info=True)}", file=sys.stderr)
+        print(f"{config_file}:\n{report.format_problems(include_info=True)}", file=sys.stderr)
     if report.errors:
         sys.exit(1)
     print(f"Config file is valid: {config_file}")

@@ -12,7 +12,7 @@ from pydantic import (BaseModel, BeforeValidator, ConfigDict, Field, ValidationE
 from pydantic_core import PydanticCustomError
 
 from . import config as config_store
-from .config import SCHEMA_FILE_NAME, SCHEMA_REFERENCE, replace_file
+from .config import SCHEMA_FILE_NAME, SCHEMA_REFERENCE, write_file_atomically
 from .utils.name import sanitize
 from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS
 from .utils.preflight import PreflightError, normalize_deployment_url, validate_project_id
@@ -51,36 +51,36 @@ class ConfigReport:
     problems: list = field(default_factory=list)
     skipped_servers: list = field(default_factory=list)
 
-    def of(self, severity):
+    def filter_by_severity(self, severity):
         return [problem for problem in self.problems if problem.severity is severity]
 
     @property
     def errors(self):
-        return self.of(Severity.ERROR)
+        return self.filter_by_severity(Severity.ERROR)
 
     @property
     def notable(self):
         """The problems a user should see outside `elitea-mcp validate`, which alone also lists infos."""
         return [problem for problem in self.problems if problem.severity is not Severity.INFO]
 
-    def describe(self, include_info=False):
+    def format_problems(self, include_info=False):
         problems = self.problems if include_info else self.notable
         return "\n".join(f"  {problem}" for problem in problems)
 
     def __str__(self):
-        return f"Config problems:\n{self.describe()}"
+        return f"Config problems:\n{self.format_problems()}"
 
     @property
     def summary(self):
         """One short line for a tray notification, which Windows cuts at 256 characters."""
-        return shorten(self.errors if self.config is None else self.notable)
+        return summarize_for_notification(self.errors if self.config is None else self.notable)
 
-    def skipped_summary(self, total):
+    def summarize_skipped_servers(self, total):
         problems = [problem for problem in self.errors if problem.path.startswith("servers.")]
-        return shorten(problems, f"Skipped {len(self.skipped_servers)} of {total} servers: ")
+        return summarize_for_notification(problems, f"Skipped {len(self.skipped_servers)} of {total} servers: ")
 
 
-def shorten(problems, prefix=""):
+def summarize_for_notification(problems, prefix=""):
     if not problems:
         return ""
     more = f" (+{len(problems) - 1} more, see Validate Config)" if len(problems) > 1 else ""
@@ -90,24 +90,24 @@ def shorten(problems, prefix=""):
     return first + more
 
 
-def report(info: ValidationInfo, severity, key, message):
+def add_field_problem(info: ValidationInfo, severity, key, message):
     info.context["problems"].append(ConfigProblem(severity, f"{info.context.get('prefix', '')}{key}", message))
 
 
-def warn_text_read_as_true(value, info: ValidationInfo):
+def read_flag_and_warn_on_false_text(value, info: ValidationInfo):
     """Keep today's truthiness, so an update changes nothing, but say so when the text means the opposite."""
     if isinstance(value, str) and value.strip().lower() in TEXT_READ_AS_TRUE:
-        report(info, Severity.WARNING, info.field_name,
+        add_field_problem(info, Severity.WARNING, info.field_name,
                f'"{value}" is text, which this client reads as true. Write false without quotes to turn it off.')
     return bool(value)
 
 
-def seconds_or_default(value, info: ValidationInfo):
+def parse_timeout_seconds(value, info: ValidationInfo):
     """Accept what int() accepts, as before; fall back to the default with a warning, and refuse what breaks every call."""
     try:
         seconds = int(value)
     except (TypeError, ValueError):
-        report(info, Severity.WARNING, info.field_name,
+        add_field_problem(info, Severity.WARNING, info.field_name,
                f'"{value}" is not a whole number of seconds, so {DEFAULT_TIMEOUT} is used.')
         return DEFAULT_TIMEOUT
     if seconds <= 0:
@@ -116,7 +116,7 @@ def seconds_or_default(value, info: ValidationInfo):
     return seconds
 
 
-def project_id_number(value):
+def parse_project_id(value):
     if value is None or value == "":
         return None
     try:
@@ -125,7 +125,7 @@ def project_id_number(value):
         raise PydanticCustomError("project_id_not_number", 'must be a number, got "{value}"', {"value": value}) from None
 
 
-def base_url(value):
+def validate_deployment_url(value):
     if value is None or value == "":
         return None
     if not isinstance(value, str):
@@ -138,13 +138,13 @@ def base_url(value):
     return value
 
 
-def empty_if_null(value):
+def treat_null_headers_as_empty(value):
     """Read null as no headers, as the http and sse clients always have."""
     return {} if value is None else value
 
 
-Truthy = Annotated[bool, BeforeValidator(warn_text_read_as_true)]
-Seconds = Annotated[int, BeforeValidator(seconds_or_default)]
+Truthy = Annotated[bool, BeforeValidator(read_flag_and_warn_on_false_text)]
+Seconds = Annotated[int, BeforeValidator(parse_timeout_seconds)]
 
 
 class StdioServer(StdioServerParameters):
@@ -155,7 +155,7 @@ class StdioServer(StdioServerParameters):
 class RemoteServer(BaseModel):
     type: Literal["http", "sse"]
     url: str = Field(pattern=r"^https?://", description="The server's endpoint, starting with http:// or https://")
-    headers: Annotated[dict[str, str], BeforeValidator(empty_if_null)] = Field(
+    headers: Annotated[dict[str, str], BeforeValidator(treat_null_headers_as_empty)] = Field(
         default_factory=dict, description="HTTP headers sent with every request")
     stateful: Truthy = Field(False, description="Keep the connection open between tool calls")
 
@@ -168,10 +168,10 @@ class ClientConfig(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     schema_reference: Optional[str] = Field(None, alias="$schema", description="JSON Schema for editor support")
-    deployment_url: Annotated[Optional[str], BeforeValidator(base_url)] = Field(
+    deployment_url: Annotated[Optional[str], BeforeValidator(validate_deployment_url)] = Field(
         None, description="Base address of ELITEA, for example https://dev.elitea.ai")
     auth_token: Optional[Any] = Field(None, description="Personal access token from ELITEA Settings → Tokens")
-    project_id: Annotated[Optional[int], BeforeValidator(project_id_number)] = Field(
+    project_id: Annotated[Optional[int], BeforeValidator(parse_project_id)] = Field(
         None, description="ELITEA project that receives the local MCP servers")
     host: Any = Field("0.0.0.0", description="Address `elitea-mcp run --transport sse` listens on")
     port: Any = Field(8000, description="Port `elitea-mcp run --transport sse` listens on")
@@ -187,8 +187,8 @@ class ClientConfig(BaseModel):
     @classmethod
     def read_mcp_servers_and_flag_unknown_keys(cls, raw, info: ValidationInfo):
         problems = info.context["problems"]
-        problems.extend(duplicate_key_problems(raw, ""))
-        problems.extend(unknown_key_problems(raw, cls, "", ignored=("mcpServers",)))
+        problems.extend(flag_duplicate_keys(raw, ""))
+        problems.extend(flag_unknown_keys(raw, cls, "", ignored=("mcpServers",)))
         if "$schema" not in raw:
             problems.append(ConfigProblem(Severity.INFO, "$schema",
                                           f'add "$schema": "{SCHEMA_REFERENCE}" for autocompletion in editors that read JSON Schema.'))
@@ -209,7 +209,7 @@ class ClientConfig(BaseModel):
             raise PydanticCustomError("servers_not_object",
                                       'must be an object of named servers, for example {"github": {"command": "npx"}}')
         context = info.context
-        context["problems"].extend(duplicate_key_problems(servers, "servers."))
+        context["problems"].extend(flag_duplicate_keys(servers, "servers."))
         runnable, chosen_name_for, names_for = {}, {}, {}
         for raw_name, raw in servers.items():
             path = f"servers.{raw_name}"
@@ -262,21 +262,21 @@ def parse_server(raw, path, context):
     if model is None:
         add_problem(context, Severity.ERROR, f"{path}.type", f'"{raw_type}" is not a server type; use "stdio", "http" or "sse". {SKIPPED}')
         return None
-    context["problems"].extend(duplicate_key_problems(raw, f"{path}."))
-    context["problems"].extend(unknown_key_problems(raw, model, f"{path}."))
+    context["problems"].extend(flag_duplicate_keys(raw, f"{path}."))
+    context["problems"].extend(flag_unknown_keys(raw, model, f"{path}."))
     try:
         return model.model_validate({**raw, "type": kind}, context={**context, "prefix": f"{path}."})
     except ValidationError as error:
         for detail in error.errors():
-            add_problem(context, Severity.ERROR, location(path, detail["loc"]), f"{describe(detail)}. {SKIPPED}")
+            add_problem(context, Severity.ERROR, format_problem_path(path, detail["loc"]), f"{explain_validation_error(detail)}. {SKIPPED}")
         return None
 
 
-def location(prefix, loc):
+def format_problem_path(prefix, loc):
     return ".".join([prefix, *map(str, loc)]) if prefix else ".".join(map(str, loc))
 
 
-def describe(detail):
+def explain_validation_error(detail):
     """Say what the field needs in the user's terms rather than pydantic's."""
     field_name = detail["loc"][-1] if detail["loc"] else ""
     if detail["type"] == "missing":
@@ -292,29 +292,29 @@ def describe(detail):
     return detail["msg"]
 
 
-def duplicate_key_problems(obj, prefix):
+def flag_duplicate_keys(obj, prefix):
     for key in getattr(obj, "duplicate_keys", ()):
         yield ConfigProblem(Severity.WARNING, f"{prefix}{key}", "appears more than once; only the last one is used.")
 
 
-def unknown_key_problems(raw, model, prefix, ignored=()):
+def flag_unknown_keys(raw, model, prefix, ignored=()):
     known = {model_field.alias or name for name, model_field in model.model_fields.items()}
     for key in raw:
         if key in known or key in ignored:
             continue
-        suggestion = closest_key(key, known)
+        suggestion = suggest_known_key(key, known)
         hint = f' Did you mean "{suggestion}"?' if suggestion else ""
         yield ConfigProblem(Severity.WARNING, f"{prefix}{key}", f"is not a setting this client reads, so it is ignored.{hint}")
 
 
-def closest_key(key, known):
+def suggest_known_key(key, known):
     """Compare ignoring case, dashes and underscores, so projectId finds project_id and small typos still match."""
-    by_normalized = {normalize(name): name for name in known}
-    match = difflib.get_close_matches(normalize(key), list(by_normalized), n=1, cutoff=CLOSE_MATCH_CUTOFF)
+    by_normalized = {normalize_key(name): name for name in known}
+    match = difflib.get_close_matches(normalize_key(key), list(by_normalized), n=1, cutoff=CLOSE_MATCH_CUTOFF)
     return by_normalized[match[0]] if match else None
 
 
-def normalize(key):
+def normalize_key(key):
     return re.sub(r"[-_\s]", "", key).lower()
 
 
@@ -324,7 +324,7 @@ def check_config(raw):
     try:
         model = ClientConfig.model_validate(raw, context=context)
     except ValidationError as error:
-        blockers = [ConfigProblem(Severity.ERROR, location("", detail["loc"]), describe(detail)) for detail in error.errors()]
+        blockers = [ConfigProblem(Severity.ERROR, format_problem_path("", detail["loc"]), explain_validation_error(detail)) for detail in error.errors()]
         return ConfigReport(None, blockers + context["problems"], context["skipped"])
     return ConfigReport(model.model_dump(by_alias=True), context["problems"], context["skipped"])
 
@@ -335,7 +335,7 @@ def write_config_schema():
     text = json.dumps(ClientConfig.model_json_schema(by_alias=True), indent=2)
     try:
         if not path.exists() or path.read_text(encoding="utf-8") != text:
-            replace_file(path, text)
+            write_file_atomically(path, text)
     except OSError as error:
         logger.warning(f"Could not write {path}: {error}")
     return path

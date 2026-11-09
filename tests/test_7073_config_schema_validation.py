@@ -239,7 +239,7 @@ def test_every_notification_summary_fits_a_windows_balloon():
     long_name = "x" * 400
     report = check({"servers": {long_name: {"url": "https://x"}, "b": {"url": "https://y"}}})
     assert len(report.summary) <= 256
-    assert len(report.skipped_summary(2)) <= 256
+    assert len(report.summarize_skipped_servers(2)) <= 256
     assert report.summary.endswith("(+1 more, see Validate Config)")
 
 
@@ -451,7 +451,7 @@ def test_serve_prints_the_problems_and_stops_on_a_config_that_cannot_run(config_
 
 @pytest.mark.parametrize("value, port", [(8080, 8080), ("8080", 8080), ("abc", None), (0, None), (70000, None), (None, None)])
 def test_run_listens_only_on_a_valid_config_port(value, port):
-    assert main_module.config_port(value) == port
+    assert main_module.parse_config_port(value) == port
 
 
 def run_with_config_port(monkeypatch, transport, port):

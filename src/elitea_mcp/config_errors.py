@@ -72,7 +72,7 @@ class JsonObject(dict):
     duplicate_keys = ()
 
 
-def object_keeping_duplicates(pairs):
+def build_object_recording_duplicates(pairs):
     obj = JsonObject(pairs)
     if len(obj) < len(pairs):
         obj.duplicate_keys = tuple(key for key, count in Counter(key for key, _ in pairs).items() if count > 1)
@@ -90,7 +90,7 @@ def parse_config(text, config_file):
         raise ConfigError(config_file, "Config file is not valid JSON", "The file is empty",
                           ConfigMistake.EMPTY_FILE, line=1, column=1)
     try:
-        config = json.loads(text, object_pairs_hook=object_keeping_duplicates)
+        config = json.loads(text, object_pairs_hook=build_object_recording_duplicates)
     except json.JSONDecodeError as error:
         position, reason, mistake = locate_json_mistake(error)
         line = text.count("\n", 0, position) + 1

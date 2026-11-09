@@ -138,6 +138,11 @@ def base_url(value):
     return value
 
 
+def empty_if_null(value):
+    """Read null as no headers, as the http and sse clients always have."""
+    return {} if value is None else value
+
+
 Truthy = Annotated[bool, BeforeValidator(warn_text_read_as_true)]
 Seconds = Annotated[int, BeforeValidator(seconds_or_default)]
 
@@ -150,7 +155,8 @@ class StdioServer(StdioServerParameters):
 class RemoteServer(BaseModel):
     type: Literal["http", "sse"]
     url: str = Field(pattern=r"^https?://", description="The server's endpoint, starting with http:// or https://")
-    headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers sent with every request")
+    headers: Annotated[dict[str, str], BeforeValidator(empty_if_null)] = Field(
+        default_factory=dict, description="HTTP headers sent with every request")
     stateful: Truthy = Field(False, description="Keep the connection open between tool calls")
 
 

@@ -123,6 +123,13 @@ def test_streamable_http_spellings_of_other_clients_run_as_http_and_headers_are_
     assert report.notable == []
 
 
+@pytest.mark.parametrize("server_type", ["http", "sse"])
+def test_null_headers_keep_working_as_no_headers(server_type):
+    report = check({"servers": {"r": {"type": server_type, "url": "https://x/mcp", "headers": None}}})
+    assert report.config["servers"]["r"]["headers"] == {}
+    assert report.notable == []
+
+
 def test_a_url_next_to_a_command_keeps_running_as_stdio_as_it_does_today():
     report = check({"servers": {"a": {"command": "npx", "url": "https://x"}}})
     assert report.config["servers"]["a"]["type"] == "stdio"
@@ -267,6 +274,23 @@ def test_bootstrap_adds_a_server_without_removing_the_existing_ones(config_file,
     assert list(saved["servers"]) == ["a", "b", "c"]
 
 
+def test_bootstrap_moves_servers_read_from_mcp_servers_so_they_keep_running(config_file, monkeypatch):
+    save_config({"project_id": 2, "mcpServers": {"a": GOOD}})
+    monkeypatch.setattr("builtins.input", MagicMock(side_effect=["3", "c", "2", "uvx", "", "n", ""]))
+    bootstrap_servers_module.bootstrap_servers({})
+    saved = json.loads(config_file.read_text())
+    assert "mcpServers" not in saved
+    assert list(check_config(saved).config["servers"]) == ["a", "c"]
+
+
+def test_bootstrap_leaves_an_ignored_mcp_servers_alone_when_servers_is_set(config_file, monkeypatch):
+    save_config({"project_id": 2, "servers": {"a": GOOD}, "mcpServers": {"b": GOOD}})
+    monkeypatch.setattr("builtins.input", MagicMock(side_effect=["3", "c", "2", "uvx", "", "n", ""]))
+    bootstrap_servers_module.bootstrap_servers({})
+    saved = json.loads(config_file.read_text())
+    assert (list(saved["servers"]), saved["mcpServers"]) == (["a", "c"], {"b": GOOD})
+
+
 def test_a_port_typed_at_the_prompt_is_saved_as_a_number(config_file, monkeypatch):
     monkeypatch.setattr("builtins.input", MagicMock(side_effect=["https://elitea.example.com", "token", "", "9000"]))
     interactive_bootstrap()
@@ -320,7 +344,14 @@ def test_start_with_every_server_skipped_says_why_instead_of_asking_for_bootstra
     monkeypatch.setattr(server_controller_module, "load_config", load_config)
     controller = controller_with(config_file, {"servers": {"remote": {"url": "https://x/mcp"}}})
     assert controller.start_servers() is False
-    assert controller._notify_error.call_args[0][0].startswith('servers.remote: has a "url" but no "type"')
+    assert controller._notify_error.call_args[0][0].startswith('Skipped 1 of 1 servers: servers.remote: has a "url" but no "type"')
+
+
+def test_start_with_every_server_skipped_names_the_server_even_after_a_top_level_warning(config_file, monkeypatch):
+    monkeypatch.setattr(server_controller_module, "load_config", load_config)
+    controller = controller_with(config_file, {"ssl_verify": "false", "servers": {"github": {"command": "npx", "args": "-y server"}}})
+    assert controller.start_servers() is False
+    assert controller._notify_error.call_args[0][0].startswith("Skipped 1 of 1 servers: servers.github.args: must be a list")
 
 
 def test_start_writes_the_schema_next_to_the_config(config_file, monkeypatch):

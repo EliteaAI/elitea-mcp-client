@@ -14,6 +14,8 @@ def bootstrap_servers(config):
     config = load_config()
     config["project_id"] = project_id
     #
+    if not config.get("servers") and isinstance(config.get("mcpServers"), dict):
+        config["servers"] = config.pop("mcpServers")
     config["servers"] = {**_existing_servers(config), **_servers_flow()}
     #
     save_config(config)

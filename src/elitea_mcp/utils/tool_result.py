@@ -21,5 +21,9 @@ def render_tool_result(tool_result):
     """
     text = _result_text(tool_result)
     if getattr(tool_result, "isError", False):
-        return {"isError": True, "content": [{"type": "text", "text": text}]}
+        return build_error_result(text)
     return text
+
+
+def build_error_result(text):
+    return {"isError": True, "content": [{"type": "text", "text": text}]}

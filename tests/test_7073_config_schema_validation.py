@@ -17,6 +17,7 @@ from src.elitea_mcp.config_errors import parse_config
 from src.elitea_mcp.config_model import Severity, check_config
 from src.elitea_mcp.utils import server_controller as server_controller_module
 from src.elitea_mcp.utils import sio as sio_module
+from src.elitea_mcp.utils.server_registry import ServerRegistry
 from src.elitea_mcp.utils.session_manager import SessionManager, get_session_manager
 
 GOOD = {"command": "npx"}
@@ -311,7 +312,7 @@ def test_starting_the_socket_hands_its_timeout_to_the_session_manager(monkeypatc
     monkeypatch.setattr(sio_module.socketio, "Client", MagicMock(return_value=client))
     monkeypatch.setattr(sio_module.time, "sleep", lambda seconds: None)
     with pytest.raises(sio_module.PlatformConnectionError):
-        sio_module.start_socket_connection({**PLATFORM, "timeout": 7, "ssl_verify": False}, [])
+        sio_module.start_socket_connection({**PLATFORM, "timeout": 7, "ssl_verify": False}, ServerRegistry())
     assert get_session_manager().timeout == 7
 
 

@@ -13,10 +13,17 @@ from src.elitea_mcp.main import main
 from src.elitea_mcp.utils import sio as sio_module
 from src.elitea_mcp.utils.preflight import PreflightError
 from src.elitea_mcp.utils.server_controller import ServerController
+from src.elitea_mcp.utils.server_loader import ServerLoad
+from src.elitea_mcp.utils.server_registry import ServerRegistry
 from src.elitea_mcp.utils.sio import PlatformConnectionError, start_socket_connection
-
-TOOLS = [{"name": "github", "tools": []}]
 WAIT_SECONDS = 7
+
+
+def create_registry():
+    """A registry holding one healthy server, as after a successful load."""
+    registry = ServerRegistry()
+    registry.record_load(ServerLoad("github", "stdio", tools=[]))
+    return registry
 
 
 class ThreadingWSGIServer(socketserver.ThreadingMixIn, wsgiref.simple_server.WSGIServer):
@@ -77,10 +84,10 @@ def platform():
 
 def start_fast_reconnecting_client(config, notify_status, notify_error):
     """Connect a client that reconnects within a fraction of a second after a drop."""
-    client = start_socket_connection(config, TOOLS, notify_status, notify_error)
-    client.reconnection_delay = 0.2
-    client.reconnection_delay_max = 0.3
-    client.randomization_factor = 0
+    client = start_socket_connection(config, create_registry(), notify_status, notify_error)
+    client.sio.reconnection_delay = 0.2
+    client.sio.reconnection_delay_max = 0.3
+    client.sio.randomization_factor = 0
     return client
 
 
@@ -102,7 +109,7 @@ def wait_until(condition):
 def test_connected_is_reported_only_after_the_platform_answers_the_registration(platform):
     notify_status, notify_error = MagicMock(), MagicMock()
 
-    client = start_socket_connection(platform.config, TOOLS, notify_status, notify_error)
+    client = start_socket_connection(platform.config, create_registry(), notify_status, notify_error)
 
     assert platform.payloads[0]["project_id"] == 13
     notify_status.assert_called_once_with("Connected to platform")
@@ -116,7 +123,7 @@ def test_refused_registration_raises_the_platform_message_and_disconnects(platfo
 
     with patch.object(socketio.Client, "disconnect", autospec=True, side_effect=socketio.Client.disconnect) as disconnect:
         with pytest.raises(PlatformConnectionError, match="User has no access to project 13."):
-            start_socket_connection(platform.config, TOOLS, notify_status, MagicMock())
+            start_socket_connection(platform.config, create_registry(), notify_status, MagicMock())
 
     disconnect.assert_called_once()
     assert "Connected to platform" not in [c.args[0] for c in notify_status.call_args_list]
@@ -126,7 +133,7 @@ def test_declined_server_is_reported_to_the_tray_with_its_reason(platform):
     platform.notification = "github - declined."
     notify_status = MagicMock()
 
-    client = start_socket_connection(platform.config, TOOLS, notify_status, MagicMock())
+    client = start_socket_connection(platform.config, create_registry(), notify_status, MagicMock())
 
     wait_until(lambda: notify_status.call_count == 2)
     notify_status.assert_any_call(
@@ -138,7 +145,7 @@ def test_declined_server_is_reported_to_the_tray_with_its_reason(platform):
 
 def test_stopping_the_client_is_a_status_not_an_error(platform):
     notify_status, notify_error = MagicMock(), MagicMock()
-    client = start_socket_connection(platform.config, TOOLS, notify_status, notify_error)
+    client = start_socket_connection(platform.config, create_registry(), notify_status, notify_error)
 
     client.disconnect()
 
@@ -154,7 +161,7 @@ def test_unreachable_platform_fails_after_bounded_attempts():
 
     with patch.object(socketio.Client, "connect", autospec=True, side_effect=socketio.exceptions.ConnectionError("refused")) as connect:
         with pytest.raises(PlatformConnectionError, match="Could not connect to http://127.0.0.1:9 after 3 attempts: refused"):
-            start_socket_connection(config, TOOLS, notify_status, MagicMock())
+            start_socket_connection(config, create_registry(), notify_status, MagicMock())
 
     assert connect.call_count == 3
     assert all("retry" not in c.kwargs for c in connect.call_args_list)
@@ -164,12 +171,11 @@ def test_unreachable_platform_fails_after_bounded_attempts():
     ]
 
 
-@patch("src.elitea_mcp.utils.server_controller.start_socket_connection")
-@patch("src.elitea_mcp.utils.server_controller.get_all_tools")
+@patch("src.elitea_mcp.utils.server_controller.ServerSupervisor")
 @patch("src.elitea_mcp.utils.server_controller.validate_platform_config", side_effect=PreflightError("Authentication failed: the token is invalid or expired."))
 @patch("src.elitea_mcp.utils.server_controller.write_config_schema")
 @patch("src.elitea_mcp.utils.server_controller.load_config", return_value={"servers": {"github": {"command": "npx"}}})
-def test_tray_start_reports_the_preflight_failure_and_never_opens_a_socket(mock_load_config, mock_write_schema, mock_validate, mock_get_all_tools, mock_start_socket):
+def test_tray_start_reports_the_preflight_failure_and_never_opens_a_socket(mock_load_config, mock_write_schema, mock_validate, mock_supervisor):
     controller = ServerController()
     controller.set_status_callback(MagicMock())
     controller.set_error_callback(MagicMock())
@@ -178,22 +184,21 @@ def test_tray_start_reports_the_preflight_failure_and_never_opens_a_socket(mock_
     controller.server_thread.join(timeout=WAIT_SECONDS)
 
     controller.error_callback.assert_called_once_with("Authentication failed: the token is invalid or expired.")
-    mock_get_all_tools.assert_not_called()
-    mock_start_socket.assert_not_called()
+    mock_supervisor.assert_not_called()
     assert controller.is_running is False
 
 
-@patch("src.elitea_mcp.commands.run_servers.start_socket_connection")
+@patch("src.elitea_mcp.commands.run_servers.ServerSupervisor")
 @patch("src.elitea_mcp.commands.run_servers.validate_platform_config", side_effect=PreflightError('"project_id" is not set.'))
 @patch("src.elitea_mcp.commands.run_servers.write_config_schema")
 @patch("src.elitea_mcp.commands.run_servers.load_config", return_value={"servers": {"github": {"command": "npx"}}})
-def test_serve_exits_with_the_preflight_message(mock_load_config, mock_write_schema, mock_validate, mock_start_socket, capsys):
+def test_serve_exits_with_the_preflight_message(mock_load_config, mock_write_schema, mock_validate, mock_supervisor, capsys):
     with pytest.raises(SystemExit) as exit_info:
         run_servers()
 
     assert exit_info.value.code == 1
     assert 'Cannot connect to platform: "project_id" is not set.' in capsys.readouterr().out
-    mock_start_socket.assert_not_called()
+    mock_supervisor.assert_not_called()
 
 
 @patch("src.elitea_mcp.main.logger")

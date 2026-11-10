@@ -18,6 +18,7 @@ from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS
 from .utils.preflight import PreflightError, normalize_deployment_url, validate_project_id
 
 DEFAULT_TIMEOUT = 30
+DEFAULT_STARTUP_TIMEOUT = 30
 NOTIFICATION_LIMIT = 250
 TEXT_READ_AS_TRUE = frozenset({"false", "no", "off", "0"})
 TRANSPORT_ALIASES = {"streamable-http": "http", "streamablehttp": "http", "streamable_http": "http"}
@@ -147,9 +148,13 @@ Truthy = Annotated[bool, BeforeValidator(read_flag_and_warn_on_false_text)]
 Seconds = Annotated[int, BeforeValidator(parse_timeout_seconds)]
 
 
+STARTUP_TIMEOUT_DESCRIPTION = "Seconds a server may take to start and answer, before it is reported as timed out"
+
+
 class StdioServer(StdioServerParameters):
     type: Literal["stdio"] = "stdio"
     stateful: Truthy = Field(False, description="Keep the server process running between tool calls")
+    startup_timeout: Optional[Seconds] = Field(None, description=f"{STARTUP_TIMEOUT_DESCRIPTION}; overrides the top-level setting")
 
 
 class RemoteServer(BaseModel):
@@ -158,6 +163,7 @@ class RemoteServer(BaseModel):
     headers: Annotated[dict[str, str], BeforeValidator(treat_null_headers_as_empty)] = Field(
         default_factory=dict, description="HTTP headers sent with every request")
     stateful: Truthy = Field(False, description="Keep the connection open between tool calls")
+    startup_timeout: Optional[Seconds] = Field(None, description=f"{STARTUP_TIMEOUT_DESCRIPTION}; overrides the top-level setting")
 
 
 SERVER_MODELS = {"stdio": StdioServer, "http": RemoteServer, "sse": RemoteServer}
@@ -176,6 +182,7 @@ class ClientConfig(BaseModel):
     host: Any = Field("0.0.0.0", description="Address `elitea-mcp run --transport sse` listens on")
     port: Any = Field(8000, description="Port `elitea-mcp run --transport sse` listens on")
     timeout: Seconds = Field(DEFAULT_TIMEOUT, description="Seconds to wait for a tool list or a tool call")
+    startup_timeout: Seconds = Field(DEFAULT_STARTUP_TIMEOUT, description=STARTUP_TIMEOUT_DESCRIPTION)
     ssl_verify: Truthy = Field(False, description="Verify the platform's TLS certificate")
     update_check: Truthy = Field(True, description="Check PyPI for new versions of the client")
     update_check_interval_hours: Any = Field(DEFAULT_CHECK_INTERVAL_HOURS,

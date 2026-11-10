@@ -1,26 +1,38 @@
 import asyncio
+import logging
+import tempfile
 import threading
 import time
 from typing import Callable, Any, Dict, Iterable, List
 
 import socketio
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.sse import sse_client
-from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
 
 from ..config import is_ssl_verification_enabled
-from .session_manager import get_session_manager
-from .tool_result import render_tool_result
+from ..config_model import DEFAULT_STARTUP_TIMEOUT
+from .client_identity import EPOCH, load_client_id, take_next_generation
+from .server_loader import (ServerStartError, find_leaf_exception, load_servers, open_session, read_startup_timeout,
+                            read_transport, redact_urls, replay_stderr)
+from .server_registry import FAILED, HEALTHY
+from .session_manager import TEARDOWN_MARGIN, get_session_manager
+from .tool_result import build_error_result, render_tool_result
 
 CONNECT_ATTEMPTS = 3
 CONNECT_RETRY_DELAY = 2
 REGISTRATION_TIMEOUT = 30
+SYNC_ATTEMPTS = 3
+RESYNC_DELAY = 60
+PROTOCOL = 2
 DECLINED_NOTIFICATION_SUFFIX = " - declined."
+
+logger = logging.getLogger(__name__)
 
 
 class PlatformConnectionError(Exception):
     """The platform could not be reached or refused to register the local MCP servers."""
+
+
+class RegistrationTimeout(PlatformConnectionError):
+    """The platform did not answer a registration in time, so it may still apply it."""
 
 
 def _sanitize_server_tools(all_tools: Any) -> List[Dict[str, Any]]:
@@ -105,64 +117,198 @@ def _sanitize_server_tools(all_tools: Any) -> List[Dict[str, Any]]:
     return sanitized_servers
 
 
-def start_socket_connection(config, all_tools, notify_status: Callable[[str], None] = None, notify_error: Callable[[str], None] = None):
-    notify_status = notify_status or _ignore_message
-    notify_error = notify_error or _ignore_message
+def start_socket_connection(config, registry, notify_status: Callable[[str], None] = None,
+                            notify_error: Callable[[str], None] = None, on_server_failed: Callable[[str], None] = None):
+    """Connect to the platform and register the registry's healthy servers, raising PlatformConnectionError when that fails."""
+    link = PlatformLink(config, registry, notify_status, notify_error, on_server_failed)
+    link.connect()
+    return link
 
-    if is_ssl_verification_enabled(config):
-        sio = socketio.Client()
-        print("SSL verification enabled for SocketIO connection")
-    else:
-        sio = socketio.Client(ssl_verify=False, logger=False, engineio_logger=False)
-        print("SSL verification disabled for SocketIO connection")
 
-    registration = {"done": False}
-    get_session_manager().timeout = config['timeout']
+class PlatformLink:
+    """The socket to the platform and the snapshots of this client's servers that are sent over it."""
 
-    def register_on_platform():
-        """Register the local MCP servers and report the platform's answer, raising when it refuses them."""
+    def __init__(self, config, registry, notify_status=None, notify_error=None, on_server_failed=None):
+        self.config = config
+        self.registry = registry
+        self.notify_status = notify_status or _ignore_message
+        self.notify_error = notify_error or _ignore_message
+        self.on_server_failed = on_server_failed or _ignore_message
+        self.startup_timeout = config.get("startup_timeout") or DEFAULT_STARTUP_TIMEOUT
+        self.client_id = load_client_id()
+        self.platform_protocol = None
+        self.registered = False
+        self._state_lock = threading.Lock()
+        self._sending = False
+        self._dirty = False
+        self._pending_names = None
+        self._reregistering = False
+        self._resync_timer = None
+        self._update_failing = False
+        self.sio = create_socket_client(config)
+        session_manager = get_session_manager()
+        session_manager.timeout = config['timeout']
+        session_manager.startup_timeout = self.startup_timeout
+        session_manager.on_tools_changed = self.on_tools_changed
+        self.sio.on("connect", self.on_connect)
+        self.sio.on("disconnect", self.on_disconnect)
+        self.sio.on("mcp_tools_list", self.on_mcp_tools_list)
+        self.sio.on("mcp_tools_call", self.on_mcp_tools_call)
+        self.sio.on("mcp_notification", self.on_mcp_notification)
+        self.sio.on("mcp_ping", self.on_mcp_ping)
+
+    @property
+    def connected(self):
+        return self.sio.connected
+
+    def connect(self):
+        _connect_with_retries(self.sio, self.config, self.notify_status)
         try:
-            ack = sio.call("mcp_connect", {
-                "project_id": config["project_id"],
-                "toolkit_configs": _sanitize_server_tools(all_tools),
-                "timeout_tools_list": config['timeout'],
-                "timeout_tools_call": config['timeout']
-            }, timeout=REGISTRATION_TIMEOUT)
-        except socketio.exceptions.TimeoutError:
-            raise PlatformConnectionError(f"The platform did not confirm the registration within {REGISTRATION_TIMEOUT} seconds.") from None
-        if isinstance(ack, dict) and ack.get("ok") is False:
-            raise PlatformConnectionError(ack.get("message") or f"The platform refused the connection: {ack.get('error')}")
+            self.send_snapshot()
+        except PlatformConnectionError:
+            self.sio.disconnect()
+            raise
+        self.registered = True
         print("Connected to platform")
-        notify_status("Connected to platform")
+        self.notify_status("Connected to platform")
+        threading.Thread(target=self.sio.wait, daemon=True).start()
 
-    def register_after_reconnect(connection_sid):
-        """Register again after an automatic reconnect, because the platform forgets a client's servers when its socket drops."""
+    def disconnect(self):
+        if self._resync_timer is not None:
+            self._resync_timer.cancel()
+        self.sio.disconnect()
+
+    def build_snapshot(self, names=None):
+        """The whole state on a protocol 2 platform; elsewhere only the named servers, without a generation so they are only added."""
+        additive = names is not None and self.platform_protocol != PROTOCOL
+        healthy = [entry for entry in self.registry.list_by_status(HEALTHY) if not additive or entry.name in names]
+        identity = {} if additive else {"client_id": self.client_id, "epoch": EPOCH, "generation": take_next_generation()}
+        return {
+            "project_id": self.config["project_id"],
+            "toolkit_configs": _sanitize_server_tools([{"name": entry.name, "tools": entry.tools} for entry in healthy]),
+            "timeout_tools_list": self.config['timeout'],
+            "timeout_tools_call": self.config['timeout'],
+            "protocol": PROTOCOL,
+            **identity,
+            "failed_servers": [
+                {"name": entry.name, "transport": entry.transport, "kind": entry.failure.kind, "message": redact_urls(entry.message)}
+                for entry in self.registry.list_by_status(FAILED) if entry.name
+            ],
+        }
+
+    def send_snapshot(self, names=None):
+        snapshot = self.build_snapshot(names)
         try:
-            register_on_platform()
-        except PlatformConnectionError as error:
-            if sio.get_sid() != connection_sid:
+            ack = self.sio.call("mcp_connect", snapshot, timeout=REGISTRATION_TIMEOUT)
+        except socketio.exceptions.TimeoutError:
+            raise RegistrationTimeout(f"The platform did not confirm the registration within {REGISTRATION_TIMEOUT} seconds.") from None
+        self.apply_ack(ack, [toolkit["name"] for toolkit in snapshot["toolkit_configs"]])
+
+    def apply_ack(self, ack, sent_names):
+        if not isinstance(ack, dict):
+            self.registry.mark_all_registered(sent_names)
+            return
+        if ack.get("ok") is False:
+            raise PlatformConnectionError(ack.get("message") or f"The platform refused the connection: {ack.get('error')}")
+        self.platform_protocol = ack.get("protocol")
+        if ack.get("stale"):
+            return
+        self.registry.apply_registration(sent_names, set(ack.get("registered") or []), ack.get("declined") or [],
+                                         keep_own_names=self.platform_protocol != PROTOCOL)
+
+    def sync(self, names=None):
+        """Send the current state, merging requests that arrive while a send is in flight into the next one."""
+        with self._state_lock:
+            if self._dirty:
+                self._pending_names = None if self._pending_names is None or names is None else self._pending_names | set(names)
+            else:
+                self._pending_names = None if names is None else set(names)
+            self._dirty = True
+            if self._sending:
                 return
+            self._sending = True
+        try:
+            while True:
+                with self._state_lock:
+                    if not self._dirty:
+                        self._sending = False
+                        return
+                    names, self._dirty = self._pending_names, False
+                self.send_with_resend(names)
+        except BaseException:
+            with self._state_lock:
+                self._sending = False
+            raise
+
+    def send_with_resend(self, names):
+        """Resend with a new generation when an answer times out; only a failed re-registration after a reconnect drops the socket."""
+        connection_sid = self.sio.get_sid()
+        error = None
+        for _ in range(SYNC_ATTEMPTS):
+            try:
+                self.send_snapshot(names)
+                self.announce_connected()
+                return
+            except RegistrationTimeout as timeout:
+                error = timeout
+            except PlatformConnectionError as refusal:
+                error = refusal
+                break
+            except socketio.exceptions.SocketIOError:
+                return
+        if self.sio.get_sid() != connection_sid:
+            return
+        if self._reregistering:
             print(f"Failed to register on platform: {error}")
-            notify_error(str(error))
-            sio.disconnect()
+            self.notify_error(str(error))
+            self.sio.disconnect()
+            return
+        self.schedule_resync(names, error)
 
-    @sio.event
-    def connect():
-        if registration["done"]:
-            sio.start_background_task(register_after_reconnect, sio.get_sid())
+    def schedule_resync(self, names, error):
+        """Keep the socket, so the platform keeps the last state it accepted, and try the update again later."""
+        print(f"Failed to update the platform: {error}")
+        if not self._update_failing:
+            self._update_failing = True
+            self.notify_status(f"Could not update the platform: {error} Retrying in {RESYNC_DELAY} s.")
+        if self._resync_timer is not None:
+            self._resync_timer.cancel()
+        self._resync_timer = threading.Timer(RESYNC_DELAY, self.sync, args=(names,))
+        self._resync_timer.daemon = True
+        self._resync_timer.start()
 
-    @sio.event
-    def disconnect(reason):
-        if reason == sio.reason.CLIENT_DISCONNECT:
+    def push_changes(self):
+        """Tell a protocol 2 platform about a change found during the session; an older one cannot remove or update a server."""
+        if self.platform_protocol == PROTOCOL:
+            threading.Thread(target=self.sync, name="mcp-snapshot", daemon=True).start()
+
+    def on_tools_changed(self, name, tools):
+        if self.platform_protocol == PROTOCOL and self.registry.record_tools(name, tools):
+            self.push_changes()
+
+    def announce_connected(self):
+        self._update_failing = False
+        if self._reregistering:
+            self._reregistering = False
+            print("Connected to platform")
+            self.notify_status("Connected to platform")
+
+    def on_connect(self):
+        if self.registered:
+            self.registry.forget_registrations()
+            self._reregistering = True
+            self.sio.start_background_task(self.sync)
+
+    def on_disconnect(self, reason):
+        if reason == self.sio.reason.CLIENT_DISCONNECT:
             print("Disconnected from platform")
-            notify_status("Disconnected from platform")
-        elif reason == sio.reason.SERVER_DISCONNECT:
+            self.notify_status("Disconnected from platform")
+        elif reason == self.sio.reason.SERVER_DISCONNECT:
             print("Disconnected by the platform")
-            notify_error("Disconnected by the platform")
+            self.notify_error("Disconnected by the platform")
         else:
             print("Connection lost, reconnecting...")
-            notify_status("Connection lost, reconnecting...")
-        # Clean up persistent sessions when disconnecting
+            self.notify_status("Connection lost, reconnecting...")
         session_manager = get_session_manager()
         try:
             session_manager.cleanup_all()
@@ -170,64 +316,63 @@ def start_socket_connection(config, all_tools, notify_status: Callable[[str], No
         except Exception as e:
             print(f"Error during session cleanup: {e}")
 
-    @sio.event
-    def on_mcp_tools_list(data):
-        all_tools = asyncio.run(get_all_tools(config["servers"]))
-
+    def on_mcp_tools_list(self, data):
+        """Answer the legacy pull with the servers that load now; nothing on the platform sends it any more."""
+        loads = asyncio.run(load_servers(self.config["servers"], self.startup_timeout, self.config["timeout"]))
         return {
-            "project_id": config["project_id"],
-            "toolkit_configs": _sanitize_server_tools(all_tools),
-            "timeout_tools_list": config['timeout'],
-            "timeout_tools_call": config['timeout']
+            "project_id": self.config["project_id"],
+            "toolkit_configs": _sanitize_server_tools([{"name": load.name, "tools": load.tools} for load in loads if load.ok]),
+            "timeout_tools_list": self.config['timeout'],
+            "timeout_tools_call": self.config['timeout']
         }
 
-    @sio.event
-    def on_mcp_tools_call(data):
-        if "server" in data:
-            # Use synchronous wrapper to avoid asyncio.run() conflicts
-            tool_result = _mcp_tools_call_sync(
-                config["servers"][data["server"]], 
-                data["params"], 
-                server_name=data["server"]
-            )
-            #
-            return tool_result
+    def on_mcp_tools_call(self, data):
+        """Always answer, so a broken server costs the agent a named error instead of the platform's whole timeout."""
+        data = data if isinstance(data, dict) else {}
+        name = data.get("server")
+        params = data.get("params") or {}
+        server_conf = self.config["servers"].get(name)
+        if server_conf is None:
+            return build_error_result(f'Server "{name}" is not running in this MCP client.')
+        entry = self.registry.get(name)
+        if entry is not None and entry.status == FAILED:
+            return build_error_result(redact_urls(entry.message))
+        try:
+            result = _mcp_tools_call_sync(server_conf, params, server_name=name,
+                                          startup_timeout=read_startup_timeout(server_conf, self.startup_timeout))
+        except ServerStartError as error:
+            message = error.failure.describe(name, read_transport(server_conf))
+            logger.warning(message)
+            if self.registry.record_transport_failure(name, error.failure, error.stderr_tail):
+                self.on_server_failed(name)
+            return build_error_result(redact_urls(message))
+        except Exception as error:
+            leaf = find_leaf_exception(error)
+            message = f'Server "{name}": tool "{params.get("name")}" failed: {str(leaf) or type(leaf).__name__}'
+            logger.warning(message)
+            return build_error_result(redact_urls(message))
+        self.registry.record_call_success(name)
+        return result
 
-    @sio.event
-    def on_mcp_notification(notification):
+    def on_mcp_notification(self, notification):
         print(f"Platform Notification: {notification}")
         if isinstance(notification, str) and notification.endswith(DECLINED_NOTIFICATION_SUFFIX):
             server_name = notification[:-len(DECLINED_NOTIFICATION_SUFFIX)]
-            notify_status(
+            self.notify_status(
                 f'Server "{server_name}" was declined: a server with this name is already registered in project '
-                f'{config["project_id"]} (another running client, or a session that has not timed out yet).'
+                f'{self.config["project_id"]} (another running client, or a session that has not timed out yet).'
             )
 
-    @sio.event
-    def on_mcp_ping(data):
+    def on_mcp_ping(self, data):
         return True
 
-    _connect_with_retries(sio, config, notify_status)
 
-    sio.on('mcp_tools_list', on_mcp_tools_list)
-    sio.on('mcp_tools_call', on_mcp_tools_call)
-    sio.on('mcp_notification', on_mcp_notification)
-    sio.on('mcp_ping', on_mcp_ping)
-
-    try:
-        register_on_platform()
-    except PlatformConnectionError:
-        sio.disconnect()
-        raise
-    registration["done"] = True
-
-    def socketio_background_task():
-        sio.wait()
-
-    socketio_thread = threading.Thread(target=socketio_background_task, daemon=True)
-    socketio_thread.start()
-
-    return sio
+def create_socket_client(config):
+    if is_ssl_verification_enabled(config):
+        print("SSL verification enabled for SocketIO connection")
+        return socketio.Client()
+    print("SSL verification disabled for SocketIO connection")
+    return socketio.Client(ssl_verify=False, logger=False, engineio_logger=False)
 
 
 def _connect_with_retries(sio, config, notify_status):
@@ -251,7 +396,7 @@ def _ignore_message(message: str):
     """Stand in for a notification callback the caller did not provide."""
 
 
-def _mcp_tools_call_sync(server_conf, params, server_name=None):
+def _mcp_tools_call_sync(server_conf, params, server_name=None, startup_timeout=DEFAULT_STARTUP_TIMEOUT):
     """Synchronous wrapper for MCP tool calls that handles both stateful and stateless sessions."""
     session_manager = get_session_manager()
     
@@ -268,80 +413,19 @@ def _mcp_tools_call_sync(server_conf, params, server_name=None):
     
     # Use stateless session (original behavior) via async wrapper
     async def _stateless_call():
-        return await _mcp_tools_call(server_conf, params, server_name)
+        return await _mcp_tools_call(server_conf, params, startup_timeout)
     
     # Run in session manager's event loop to avoid conflicts
-    return session_manager._run_in_loop(_stateless_call())
+    return session_manager._run_in_loop(_stateless_call(), timeout=startup_timeout + session_manager.timeout + TEARDOWN_MARGIN)
 
 
-async def get_all_tools(servers=[]):
-    tasks = [
-        _process_server(server_name, server_conf)
-        for server_name, server_conf in servers.items()
-    ]
-    results = await asyncio.gather(*tasks)
-
-    # WORKAROUND
-    #
-    for server in results:
-        for tool in server.get("tools", []):
-            input_schema = tool.get("inputSchema")
-            if input_schema is not None and "required" not in input_schema:
-                input_schema["required"] = []
-    
-    return results
-
-
-async def _process_server(server_name, server_conf):
-    if server_conf.get('type', 'stdio').lower() == "stdio":
-        server_parameters = StdioServerParameters(**server_conf)
-        async with stdio_client(server_parameters) as (read, write):
-            async with ClientSession(
-                    read, write
-            ) as session:
-                await session.initialize()
-                tools_response = await session.list_tools()
-                return {"name": server_name, "tools": [tool.model_dump() for tool in tools_response.tools]}
-
-    elif server_conf["type"].lower() == "http":
-        async with streamablehttp_client(server_conf["url"], server_conf["headers"]) as (read_stream, write_stream, _):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                tools_response = await session.list_tools()
-                return {"name": server_name, "tools": [tool.model_dump() for tool in tools_response.tools]}
-
-    elif server_conf["type"].lower() == "sse":
-        async with sse_client(server_conf["url"], server_conf["headers"]) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                tools_response = await session.list_tools()
-                return {"name": server_name, "tools": [tool.model_dump() for tool in tools_response.tools]}
-
-
-
-async def _mcp_tools_call(server_conf, params, server_name=None):
-    """Async function for stateless MCP tool calls."""
-    # Use stateless session (original behavior)
-    if server_conf.get('type', 'stdio').lower() == "stdio":
-        server_parameters = StdioServerParameters(**server_conf)
-        async with stdio_client(server_parameters) as (read, write):
-            async with ClientSession(
-                    read, write
-            ) as session:
-                await session.initialize()
-                tool_result = await session.call_tool(params["name"], params["arguments"])
+async def _mcp_tools_call(server_conf, params, startup_timeout=DEFAULT_STARTUP_TIMEOUT):
+    """Start the server for one call, as servers that are not stateful are not kept running."""
+    with tempfile.TemporaryFile("w+b") as errlog:
+        try:
+            async with open_session(server_conf, startup_timeout, errlog) as session:
+                tool_result = await asyncio.wait_for(session.call_tool(params["name"], params["arguments"]),
+                                                     get_session_manager().timeout)
                 return render_tool_result(tool_result)
-
-    elif server_conf["type"].lower() == "http":
-        async with streamablehttp_client(server_conf["url"], server_conf["headers"]) as (read_stream, write_stream, _):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                tool_result = await session.call_tool(params["name"], params["arguments"])
-                return render_tool_result(tool_result)
-
-    elif server_conf["type"].lower() == "sse":
-        async with sse_client(server_conf["url"], server_conf.get("headers", {})) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                tool_result = await session.call_tool(params["name"], params["arguments"])
-                return render_tool_result(tool_result)
+        finally:
+            replay_stderr(errlog)

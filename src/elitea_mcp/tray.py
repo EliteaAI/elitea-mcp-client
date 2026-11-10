@@ -3,6 +3,7 @@
 System tray application for EliteA MCP Client.
 Provides easy access to configuration and server management.
 """
+import functools
 import json
 import os
 import sys
@@ -34,6 +35,7 @@ from .config import (SCHEMA_REFERENCE, get_bootstrap_config, set_bootstrap_confi
                      get_config_file, load_config)
 from .config_model import check_config, write_config_schema
 from .utils.server_controller import get_server_controller
+from .utils.server_registry import DECLINED, FAILED
 from .main import main, setup_file_logger, get_default_paths
 from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS, UpdateChecker, get_installed_version
 from .utils.self_update import consume_update_result, resolve_upgrade_plan, start_update_helper
@@ -69,6 +71,8 @@ class MCPTrayApp:
         # Set up callbacks for server controller
         self.server_controller.set_status_callback(self.on_server_status_change)
         self.server_controller.set_error_callback(self.on_server_error)
+        self.server_controller.set_server_callback(self.on_server_message)
+        self.server_controller.set_servers_changed_callback(self.update_menu)
         
     def create_icon_image(self):
         """Create an icon for the system tray using the EliteA logo."""
@@ -243,6 +247,10 @@ class MCPTrayApp:
                     pystray.MenuItem("Restart MCP Server", self.restart_server),
                 ])
             menu_items.append(pystray.Menu.SEPARATOR)
+
+        servers_menu = self.build_servers_menu()
+        if servers_menu:
+            menu_items.extend([pystray.MenuItem("Servers", servers_menu), pystray.Menu.SEPARATOR])
         
         menu_items.extend([
             pystray.MenuItem("Configuration", pystray.Menu(
@@ -269,6 +277,41 @@ class MCPTrayApp:
         ])
         
         return menu_items
+
+    def build_servers_menu(self):
+        """One row per server of the current or last run; a failed or declined row opens its error details."""
+        entries = list(self.server_controller.list_servers())
+        if not entries:
+            return None
+        rows = [
+            pystray.MenuItem(entry.format_menu_row(), functools.partial(self.open_server_error, entry.name))
+            if entry.status == FAILED or entry.registration == DECLINED
+            else pystray.MenuItem(entry.format_menu_row(), lambda: None)
+            for entry in entries
+        ]
+        has_failed = any(entry.status == FAILED for entry in entries)
+        return pystray.Menu(*rows, pystray.Menu.SEPARATOR,
+                            pystray.MenuItem("Retry Failed Servers", self.retry_failed_servers, enabled=has_failed))
+
+    def retry_failed_servers(self, icon=None, item=None):
+        self.server_controller.retry_failed_servers()
+
+    def open_server_error(self, name, icon=None, item=None):
+        """Write the server's reason, hint and last output to <server>-error.txt and open it."""
+        report = self.server_controller.format_server_error(name)
+        if report is None:
+            return
+        path = get_default_paths()["tray_log"].parent / f"{name}-error.txt"
+        try:
+            path.write_text(report, encoding="utf-8")
+        except OSError as error:
+            self.show_error("Server Details", f"Could not write {path}: {error}")
+            return
+        self._open_file(path)
+
+    def on_server_message(self, message):
+        self.update_menu()
+        self.show_notification("MCP Servers", message)
 
     def _read_config(self):
         """Return the bootstrap config, or None with the error kept for the menu when the file cannot be parsed or a problem stops the client."""

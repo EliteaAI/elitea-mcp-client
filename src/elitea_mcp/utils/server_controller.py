@@ -1,7 +1,6 @@
 """
 Server controller for managing MCP servers from the tray application.
 """
-import asyncio
 import multiprocessing
 import os
 import platform
@@ -26,7 +25,8 @@ if platform.system() == "Darwin":
 from ..config import load_config
 from ..config_model import check_config, write_config_schema
 from ..utils.preflight import PreflightError, validate_platform_config
-from ..utils.sio import PlatformConnectionError, start_socket_connection, get_all_tools
+from ..utils.server_supervisor import ServerSupervisor, collect_skipped_servers
+from ..utils.sio import PlatformConnectionError
 
 SERVER_RESTART_DELAY = 2  # Delay before restarting servers to allow resources to release
 MONITOR_DELAY = 5  # Delay for monitoring daemon process status
@@ -43,6 +43,10 @@ class ServerController:
         self.error_callback: Optional[Callable[[str], None]] = None
         self.daemon_mode = False
         self.config = None
+        self.skipped_servers = []
+        self.supervisor: Optional[ServerSupervisor] = None
+        self.server_callback: Optional[Callable[[str], None]] = None
+        self.servers_changed_callback: Optional[Callable[[], None]] = None
         
     def set_status_callback(self, callback: Callable[[str], None]):
         """Set callback for status updates."""
@@ -52,6 +56,36 @@ class ServerController:
         """Set callback for error notifications."""
         self.error_callback = callback
         
+    def set_server_callback(self, callback: Callable[[str], None]):
+        """Set callback for messages about one server, such as a failure or a recovery."""
+        self.server_callback = callback
+
+    def set_servers_changed_callback(self, callback: Callable[[], None]):
+        """Set callback run whenever a server's status changes, to redraw the Servers menu."""
+        self.servers_changed_callback = callback
+
+    def _notify_server(self, message: str):
+        if self.server_callback:
+            self.server_callback(message)
+
+    def _notify_servers_changed(self):
+        if self.servers_changed_callback:
+            self.servers_changed_callback()
+
+    def list_servers(self):
+        """The servers of the current or last run, for the tray's Servers menu."""
+        return self.supervisor.registry.list_entries() if self.supervisor else []
+
+    def format_server_error(self, name):
+        return self.supervisor.format_error_report(name) if self.supervisor else None
+
+    def retry_failed_servers(self):
+        """Reload only the failed servers of a running session, or start again when the last start connected none."""
+        if self.is_running and self.supervisor is not None:
+            threading.Thread(target=self.supervisor.retry_failed, name="retry-failed-servers", daemon=True).start()
+            return True
+        return self.start_servers(daemon_mode=False)
+
     def _notify_status(self, message: str):
         """Notify status change."""
         if self.status_callback:
@@ -71,7 +105,8 @@ class ServerController:
         if self.is_running:
             return True
             
-        report = check_config(load_config())
+        raw_config = load_config()
+        report = check_config(raw_config)
         write_config_schema()
         if report.config is None:
             self._notify_error(report.summary)
@@ -83,6 +118,7 @@ class ServerController:
         if report.skipped_servers:
             self._notify_error(report.summarize_skipped_servers(len(report.config["servers"]) + len(report.skipped_servers)))
         self.config = report.config
+        self.skipped_servers = collect_skipped_servers(report, raw_config)
         self.daemon_mode = daemon_mode
         
         if daemon_mode:
@@ -170,41 +206,37 @@ class ServerController:
     
     def _start_embedded_servers(self) -> bool:
         """Start MCP servers in the current process (embedded mode)."""
+        stop_event = threading.Event()
+
         def run_server_loop():
+            supervisor = None
             try:
                 self.is_running = True
                 self._notify_status("Starting MCP servers...")
                 
                 config = validate_platform_config(self.config, self._notify_status)
-                servers = config.get("servers", {})
-                all_tools = asyncio.run(get_all_tools(servers))
-                
-                if not all_tools:
-                    self._notify_error("No tools available from configured servers.")
+                supervisor = ServerSupervisor(config, self.skipped_servers, self._notify_status, self._notify_error,
+                                              self._notify_server, self._notify_servers_changed,
+                                              summary_suffix="See Servers menu.", cancelled=stop_event)
+                self.supervisor = supervisor
+                if not supervisor.start():
                     return
-                    
-                server_names = [server["name"] for server in all_tools]
-                self._notify_status(f"Connected to servers: {', '.join(server_names)}")
-                
-                # Start socket connection
-                self._notify_status("Starting socket connection...")
-                sio = start_socket_connection(config, all_tools, self._notify_status, self._notify_error)
-                
-                # Keep the server running until stop is requested
-                while not self.stop_event.is_set():
+
+                while not stop_event.is_set():
                     time.sleep(SERVER_RESTART_DELAY)
-                
-                sio.disconnect()
-                    
+
             except (PreflightError, PlatformConnectionError) as error:
                 self._notify_error(str(error))
             except Exception as e:
                 self._notify_error(f"Server error: {str(e)}")
             finally:
-                self.is_running = False
-                self._notify_status("MCP servers stopped")
+                if supervisor is not None:
+                    supervisor.stop()
+                if self.stop_event is stop_event:
+                    self.is_running = False
+                    self._notify_status("MCP servers stopped")
                 
-        self.stop_event.clear()
+        self.stop_event = stop_event
         self.server_thread = threading.Thread(target=run_server_loop, daemon=True)
         self.server_thread.start()
         return True

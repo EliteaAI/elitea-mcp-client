@@ -204,7 +204,7 @@ Shown after the first start, with one row per configured server:
 - `⚠ github — declined (name already registered)` - another running client, or a session that has not timed out yet, holds this name in the project
 - `✗ confluence — failed: command "uvx" not found` - the server could not start; the other servers are not affected
 
-Click a failed or declined row to open `<server>-error.txt` (next to the tray log) with the reason, a hint and the server's last output, with configured secrets (`auth_token`, `env` and `headers` values) replaced by `****`.
+Click a failed or declined row to open `<server>-error.txt` (next to the tray log) with the reason, a hint and the server's last output, with configured secrets (`auth_token`, `env` and `headers` values) replaced by `****`. In these messages a server URL keeps its host and path, its user name and password are removed, and every query and fragment value is shown as `****`. A token written into the URL path (for example `https://mcp.example.com/s/<token>/mcp`) stays visible on this machine; ELITEA only ever receives the URL's scheme and host.
 **Retry Failed Servers** loads only the failed servers again; healthy ones keep running. A server that timed out, could not be reached, or broke after it was working is also retried automatically after about 30 s, 1 min, 2 min and 5 min, then shows `(retry stopped)`. A missing command, an invalid config or a rejected token is never retried automatically.
 
 After a start, a notification summarises the result, for example `3 of 4 MCP servers connected. Failed: confluence (command "uvx" not found).` When every server fails, the client does not connect to ELITEA.

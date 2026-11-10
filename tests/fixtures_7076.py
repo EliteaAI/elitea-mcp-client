@@ -51,6 +51,21 @@ GROWING_SERVER = textwrap.dedent("""
 """)
 
 
+SLOW_SERVER = textwrap.dedent("""
+    import sys, time
+    time.sleep(float(sys.argv[1]))
+    from mcp.server.fastmcp import FastMCP
+    server = FastMCP("slow")
+
+    @server.tool()
+    def work() -> str:
+        time.sleep(float(sys.argv[2]))
+        return "done"
+
+    server.run()
+""")
+
+
 class UnauthorizedHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self.send_response(401)
@@ -116,6 +131,13 @@ def missing_command():
 def exits_at_start(stderr_text="boom: missing GITHUB_TOKEN"):
     return {"type": "stdio", "command": sys.executable,
             "args": ["-c", f"import sys; sys.stderr.write({stderr_text!r} + '\\n'); sys.exit(3)"]}
+
+
+def starts_and_works_slowly(directory, start_seconds, work_seconds):
+    """A healthy server that takes a while to start and whose `work` tool takes a while to answer."""
+    path = directory / "slow_server.py"
+    path.write_text(SLOW_SERVER)
+    return {"type": "stdio", "command": sys.executable, "args": [str(path), str(start_seconds), str(work_seconds)]}
 
 
 def forks_and_hangs(pid_file):

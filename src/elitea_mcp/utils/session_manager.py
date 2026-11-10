@@ -72,8 +72,21 @@ class SessionManager:
     
     def call_tool_with_recovery_sync(self, server_name: str, server_conf: dict, params: dict) -> Union[str, dict]:
         """Synchronous wrapper for call_tool_with_recovery."""
-        budget = MAX_CALL_ATTEMPTS * (read_startup_timeout(server_conf, self.startup_timeout) + TEARDOWN_MARGIN) + self.timeout
-        return self._run_in_loop(self.call_tool_with_recovery(server_name, server_conf, params), timeout=budget)
+        return self._run_in_loop(self.call_tool_with_recovery(server_name, server_conf, params),
+                                 timeout=self.calculate_stateful_call_budget(server_conf))
+
+    def calculate_stateless_call_budget(self, server_conf: dict) -> int:
+        """Seconds a call may take when the server is started for it: the start, the call and the SDK's teardown."""
+        return read_startup_timeout(server_conf, self.startup_timeout) + self.timeout + TEARDOWN_MARGIN
+
+    def calculate_stateful_call_budget(self, server_conf: dict) -> int:
+        return MAX_CALL_ATTEMPTS * (read_startup_timeout(server_conf, self.startup_timeout) + TEARDOWN_MARGIN) + self.timeout
+
+    def calculate_call_budget(self, server_conf: dict) -> int:
+        """The longest this client works on one call to the server, which the platform must wait for."""
+        if self.is_stateful(server_conf):
+            return self.calculate_stateful_call_budget(server_conf)
+        return self.calculate_stateless_call_budget(server_conf)
 
     async def get_session(self, server_name: str, server_conf: dict) -> ClientSession:
         """Get or create a session for the given server."""

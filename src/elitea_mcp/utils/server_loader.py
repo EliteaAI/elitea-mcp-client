@@ -6,8 +6,9 @@ import re
 import shutil
 import sys
 import tempfile
+import urllib.parse
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 import anyio
@@ -30,6 +31,7 @@ STDERR_TAIL_LINES = 20
 STDERR_TAIL_BYTES = 64 * 1024
 MASK = "****"
 MIN_SECRET_LENGTH = 4
+LOCAL_URL_PATTERN = re.compile(r"https?://\S+?(?=[.,:;)\"']*(?:\s|$))")
 URL_PATTERN = re.compile(r"(https?://)(?:[^\s/@?#]*@)?([^\s/?#]+?)(?:[/?#]\S*?)?(?=[.,:;)\"']*(?:\s|$))")
 AUTH_STATUS_CODES = (401, 403)
 ON_WINDOWS = os.name == "nt"
@@ -180,7 +182,13 @@ def describe_missing_command(command):
 
 
 def classify_failure(error, server_conf, startup_timeout):
-    """Map an exception raised while starting a server to a failure kind, by type rather than by message text."""
+    """Map an exception raised while starting a server to a failure kind, with the secret parts of any URL masked."""
+    failure = identify_failure(error, server_conf, startup_timeout)
+    return replace(failure, reason=mask_url_secrets(failure.reason))
+
+
+def identify_failure(error, server_conf, startup_timeout):
+    """Pick the failure kind by exception type rather than by message text."""
     leaf = find_leaf_exception(error)
     transport = read_transport(server_conf)
     if isinstance(leaf, ServerStartError):
@@ -273,10 +281,29 @@ def mask_secrets(lines, secrets):
     for line in lines:
         for secret in secrets:
             line = line.replace(secret, MASK)
-        masked.append(line)
+        masked.append(mask_url_secrets(line))
     return masked
 
 
 def redact_urls(text):
     """Keep only the scheme and host of every URL, because hosted MCP servers often carry a secret in the path or query."""
     return URL_PATTERN.sub(lambda match: f"{match.group(1)}{match.group(2)}", text)
+
+
+def mask_url_secrets(text):
+    """For text shown on this machine: drop a URL's user and password and mask every query and fragment value."""
+    return LOCAL_URL_PATTERN.sub(lambda match: mask_url(match.group(0)), text)
+
+
+def mask_url(url):
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return redact_urls(url)
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc.rpartition("@")[2], parts.path,
+                                    mask_parameters(parts.query), mask_parameters(parts.fragment)))
+
+
+def mask_parameters(text):
+    pairs = (part.partition("=") for part in text.split("&") if part)
+    return "&".join(f"{key}={MASK}" if separator else MASK for key, separator, _ in pairs)

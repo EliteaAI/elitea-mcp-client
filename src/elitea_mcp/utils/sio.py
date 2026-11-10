@@ -11,9 +11,9 @@ from ..config import is_ssl_verification_enabled
 from ..config_model import DEFAULT_STARTUP_TIMEOUT
 from .client_identity import EPOCH, load_client_id, take_next_generation
 from .server_loader import (ServerStartError, find_leaf_exception, load_servers, open_session, read_startup_timeout,
-                            read_transport, redact_urls, replay_stderr)
+                            mask_url_secrets, read_transport, redact_urls, replay_stderr)
 from .server_registry import FAILED, HEALTHY
-from .session_manager import TEARDOWN_MARGIN, get_session_manager
+from .session_manager import get_session_manager
 from .tool_result import build_error_result, render_tool_result
 
 CONNECT_ATTEMPTS = 3
@@ -183,11 +183,14 @@ class PlatformLink:
         additive = names is not None and self.platform_protocol != PROTOCOL
         healthy = [entry for entry in self.registry.list_by_status(HEALTHY) if not additive or entry.name in names]
         identity = {} if additive else {"client_id": self.client_id, "epoch": EPOCH, "generation": take_next_generation()}
+        toolkit_configs = [{**toolkit, "timeout_tools_call": self.calculate_call_budget(toolkit["name"])}
+                           for toolkit in _sanitize_server_tools([{"name": entry.name, "tools": entry.tools} for entry in healthy])]
         return {
             "project_id": self.config["project_id"],
-            "toolkit_configs": _sanitize_server_tools([{"name": entry.name, "tools": entry.tools} for entry in healthy]),
+            "toolkit_configs": toolkit_configs,
             "timeout_tools_list": self.config['timeout'],
-            "timeout_tools_call": self.config['timeout'],
+            "timeout_tools_call": max((toolkit["timeout_tools_call"] for toolkit in toolkit_configs),
+                                      default=get_session_manager().calculate_stateless_call_budget({})),
             "protocol": PROTOCOL,
             **identity,
             "failed_servers": [
@@ -195,6 +198,10 @@ class PlatformLink:
                 for entry in self.registry.list_by_status(FAILED) if entry.name
             ],
         }
+
+    def calculate_call_budget(self, name):
+        """Per server, so the platform waits as long as this client may take; an older platform reads only the largest."""
+        return get_session_manager().calculate_call_budget(self.config.get("servers", {}).get(name) or {})
 
     def send_snapshot(self, names=None):
         snapshot = self.build_snapshot(names)
@@ -342,14 +349,14 @@ class PlatformLink:
                                           startup_timeout=read_startup_timeout(server_conf, self.startup_timeout))
         except ServerStartError as error:
             message = error.failure.describe(name, read_transport(server_conf))
-            logger.warning(message)
+            logger.warning(mask_url_secrets(message))
             if self.registry.record_transport_failure(name, error.failure, error.stderr_tail):
                 self.on_server_failed(name)
             return build_error_result(redact_urls(message))
         except Exception as error:
             leaf = find_leaf_exception(error)
             message = f'Server "{name}": tool "{params.get("name")}" failed: {str(leaf) or type(leaf).__name__}'
-            logger.warning(message)
+            logger.warning(mask_url_secrets(message))
             return build_error_result(redact_urls(message))
         self.registry.record_call_success(name)
         return result
@@ -416,7 +423,8 @@ def _mcp_tools_call_sync(server_conf, params, server_name=None, startup_timeout=
         return await _mcp_tools_call(server_conf, params, startup_timeout)
     
     # Run in session manager's event loop to avoid conflicts
-    return session_manager._run_in_loop(_stateless_call(), timeout=startup_timeout + session_manager.timeout + TEARDOWN_MARGIN)
+    return session_manager._run_in_loop(_stateless_call(), timeout=session_manager.calculate_stateless_call_budget(
+        {**server_conf, "startup_timeout": startup_timeout}))
 
 
 async def _mcp_tools_call(server_conf, params, startup_timeout=DEFAULT_STARTUP_TIMEOUT):

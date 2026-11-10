@@ -11,7 +11,7 @@ import socketio
 from src.elitea_mcp.utils import sio as sio_module
 from src.elitea_mcp.utils.client_identity import read_machine_part
 from src.elitea_mcp.utils.server_loader import (EXITED, INVALID_CONFIG, TIMEOUT, UNREACHABLE, ServerFailure, ServerLoad,
-                                                load_servers, redact_urls)
+                                                load_servers, read_startup_timeout, redact_urls)
 from src.elitea_mcp.utils.server_registry import DECLINED, FAILED, HEALTHY, REGISTERED, ServerRegistry
 from src.elitea_mcp.utils.sio import start_socket_connection
 from tests import fixtures_7076 as fixtures
@@ -509,3 +509,63 @@ def test_a_header_value_http_refuses_is_a_config_error_that_never_carries_the_to
     assert 'a name or value in "headers" is not valid in HTTP' in live_reply["content"][0]["text"]
     live_link.sio.reconnection = False
     protocol_2_platform.close(link)
+
+
+def test_the_platform_waits_for_a_slow_start_plus_a_slow_call_that_fit_the_reported_budget(protocol_2_platform, tmp_path):
+    server = fixtures.starts_and_works_slowly(tmp_path, start_seconds=2, work_seconds=2)
+    config = {**protocol_2_platform.config({"slow": server}), "timeout": 3, "startup_timeout": 5}
+    link = start_socket_connection(config, registry_with(healthy=["slow"]))
+    reported = protocol_2_platform.payloads[0]["toolkit_configs"][0]["timeout_tools_call"]
+
+    started = time.monotonic()
+    result = protocol_2_platform.server.call("mcp_tools_call", {"server": "slow", "params": {"name": "work", "arguments": {}}},
+                                             to=protocol_2_platform.sids[-1], timeout=reported)
+
+    assert reported == 5 + 3 + 5
+    assert time.monotonic() - started > config["timeout"]
+    assert result == "done"
+    protocol_2_platform.close(link)
+
+
+def test_each_server_reports_its_own_call_budget_and_an_old_platform_gets_the_largest(legacy_platform):
+    servers = {"quick": {"command": "x"}, "npx_based": {"command": "x", "startup_timeout": 120}, "kept": {"command": "x", "stateful": True}}
+    config = {**legacy_platform.config(servers), "timeout": 30, "startup_timeout": 30}
+    link = start_socket_connection(config, registry_with(healthy=list(servers)))
+
+    payload = legacy_platform.payloads[0]
+    budgets = {toolkit["name"]: toolkit["timeout_tools_call"] for toolkit in payload["toolkit_configs"]}
+
+    assert budgets == {"quick": 30 + 30 + 5, "npx_based": 120 + 30 + 5, "kept": 2 * (30 + 5) + 30}
+    assert payload["timeout_tools_call"] == 155
+    assert payload["timeout_tools_list"] == 30
+    link.disconnect()
+
+
+@pytest.mark.parametrize("server", [{"command": "x", "startup_timeout": 50}, {"command": "x", "stateful": True, "startup_timeout": 50}])
+def test_the_reported_call_budget_is_the_one_the_client_enforces(legacy_platform, server):
+    config = {**legacy_platform.config({"s": server}), "timeout": 20, "startup_timeout": 30}
+    link = start_socket_connection(config, registry_with(healthy=["s"]))
+    reported = legacy_platform.payloads[0]["toolkit_configs"][0]["timeout_tools_call"]
+    manager = sio_module.get_session_manager()
+
+    with patch.object(manager, "_run_in_loop", return_value="ok") as run, patch.object(manager, "_sessions", {}):
+        if server.get("stateful"):
+            manager.call_tool_with_recovery_sync("s", server, {"name": "t", "arguments": {}})
+        else:
+            sio_module._mcp_tools_call_sync(server, {"name": "t", "arguments": {}}, server_name="s",
+                                            startup_timeout=read_startup_timeout(server, link.startup_timeout))
+
+    assert run.call_args.kwargs["timeout"] == reported
+    run.call_args.args[0].close()
+    link.disconnect()
+
+
+def test_a_tool_error_quoting_a_bracketed_url_is_still_answered_with_a_named_error(protocol_2_platform):
+    link = connect(protocol_2_platform, registry_with(healthy=["api"]), {"api": {"command": "x"}})
+
+    with patch.object(sio_module, "_mcp_tools_call_sync", side_effect=RuntimeError("upstream [http://api.internal:8080] returned 502")):
+        result = link.on_mcp_tools_call({"server": "api", "params": {"name": "get", "arguments": {}}})
+
+    assert result["isError"] is True
+    assert result["content"][0]["text"].startswith('Server "api": tool "get" failed: upstream [http://api.internal')
+    link.disconnect()

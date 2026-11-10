@@ -8,7 +8,9 @@ import pytest
 from src.elitea_mcp.config_model import check_config
 from src.elitea_mcp.utils import server_loader
 from src.elitea_mcp.utils.server_loader import (AUTH, COMMAND_NOT_FOUND, EXITED, TIMEOUT, UNREACHABLE,
-                                                collect_secret_values, load_servers, mask_secrets)
+                                                collect_secret_values, load_servers, mask_secrets, mask_url_secrets)
+from src.elitea_mcp.utils.server_registry import ServerRegistry
+from src.elitea_mcp.utils.server_supervisor import ServerSupervisor
 from tests import fixtures_7076 as fixtures
 
 STARTUP_TIMEOUT = 3
@@ -200,3 +202,58 @@ def test_a_stdio_server_that_times_out_leaves_none_of_its_children_running(tmp_p
         time.sleep(0.1)
     os.kill(child, 9)
     pytest.fail(f"child process {child} of the timed-out server is still running")
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("https://user:pa55w0rd@host.example:8443/mcp", "https://host.example:8443/mcp"),
+    ("https://host.example/mcp?api_key=S1&region=eu&token=S2", "https://host.example/mcp?api_key=****&region=****&token=****"),
+    ("https://host.example/mcp", "https://host.example/mcp"),
+    ("cannot reach https://u:p@host.example/sse?key=S1: connection refused.", "cannot reach https://host.example/sse?key=****: connection refused."),
+    ("https://host.example/a#access_token=S3", "https://host.example/a#access_token=****"),
+])
+def test_local_text_keeps_a_urls_host_and_path_but_not_its_secrets(text, expected):
+    assert mask_url_secrets(text) == expected
+
+
+def test_a_token_inside_the_url_path_stays_visible_locally_as_documented():
+    assert mask_url_secrets("https://mcp.zapier.com/api/mcp/s/TOKEN123/mcp") == "https://mcp.zapier.com/api/mcp/s/TOKEN123/mcp"
+
+
+def test_every_local_surface_shows_the_masked_url():
+    url = f"http://user:pa55w0rd@127.0.0.1:{fixtures.find_closed_port()}/mcp?api_key=SECRET1"
+    supervisor = ServerSupervisor({"auth_token": "t", "timeout": 30, "servers": {"remote": {"type": "http", "url": url, "headers": {}}}})
+
+    supervisor.load()
+
+    entry = supervisor.registry.get("remote")
+    for text in (entry.message, entry.format_menu_row(), entry.describe_status(), supervisor.format_error_report("remote")):
+        assert "SECRET1" not in text and "pa55w0rd" not in text
+        assert "/mcp?api_key=****" in text
+
+
+def test_server_output_shown_locally_has_its_urls_masked_too():
+    assert mask_secrets(["GET https://host.example/mcp?api_key=SECRET1 failed"], []) == ["GET https://host.example/mcp?api_key=**** failed"]
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("proxy target: [http://localhost:3000]", "proxy target: [http://localhost:3000]"),
+    ("usage: --url http://[host]:port/mcp", "usage: --url http://[host]:port"),
+    ("http://[::1]:8080/mcp?token=abc", "http://[::1]:8080/mcp?token=****"),
+    ("see [https://a](https://u:p@b/x?token=SECRET)", "see [https://a](https:"),
+])
+def test_text_with_a_url_that_does_not_parse_is_masked_without_raising(text, expected):
+    masked = mask_url_secrets(text)
+
+    assert masked.startswith(expected)
+    assert "SECRET" not in masked and "u:p@" not in masked
+
+
+def test_a_failing_servers_bracketed_url_in_its_output_never_stops_the_other_servers(tmp_path):
+    servers = {"ok": fixtures.healthy(tmp_path), "proxy": fixtures.exits_at_start("proxy target: [http://localhost:3000]")}
+    supervisor = ServerSupervisor({"auth_token": "t", "timeout": 30, "startup_timeout": 5, "servers": servers})
+
+    supervisor.load()
+
+    assert supervisor.registry.get("ok").status == "healthy"
+    assert "proxy target: [http://localhost:3000]" in supervisor.format_error_report("proxy")
+    assert supervisor.read_console_output("proxy") == ["proxy target: [http://localhost:3000]"]

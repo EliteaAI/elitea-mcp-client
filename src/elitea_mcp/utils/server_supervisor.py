@@ -1,6 +1,7 @@
 """Run the configured servers for one session: load each on its own, register the healthy ones, retry the failed ones."""
 import asyncio
 import logging
+import random
 import threading
 
 from ..config_model import DEFAULT_STARTUP_TIMEOUT, SKIPPED
@@ -28,6 +29,13 @@ def collect_skipped_servers(report, raw_config):
         transport = str(raw.get("type") or "stdio") if isinstance(raw, dict) else "stdio"
         skipped.append((sanitize(raw_name) or raw_name, transport, f"{field}: {detail}" if field else detail))
     return skipped
+
+
+def calculate_retry_delay(entry):
+    """The next step of the schedule with equal jitter, so clients hit by one outage do not retry together, never sooner than Retry-After."""
+    step = RETRY_DELAYS[min(entry.retry_attempts, len(RETRY_DELAYS) - 1)]
+    delay = step / 2 + random.uniform(0, step / 2)
+    return max(delay, entry.failure.retry_after or 0)
 
 
 def ignore_message(message):
@@ -111,9 +119,8 @@ class ServerSupervisor:
 
     def stop(self):
         self._stopped = True
-        for timer in list(self._timers.values()):
-            timer.cancel()
-        self._timers.clear()
+        for name in list(self._timers):
+            self.cancel_retry(name)
         if self.link is not None:
             self.link.disconnect()
 
@@ -151,15 +158,13 @@ class ServerSupervisor:
         self.schedule_retry(name)
 
     def schedule_retry(self, name):
+        """Retry a failure that may fix itself for as long as it lasts, slowing to the last delay as unattended supervisors do."""
         entry = self.registry.get(name)
         if self._stopped or entry is None or not entry.can_auto_retry:
             return
-        if entry.retry_attempts >= len(RETRY_DELAYS):
-            self.registry.record_retry_stopped(name)
-            self.notify_server(f"{entry.message} Automatic retry stopped.")
-            return
-        timer = threading.Timer(RETRY_DELAYS[entry.retry_attempts], self.retry_failed,
-                                kwargs={"names": [name], "automatic": True})
+        if entry.retry_attempts == len(RETRY_DELAYS):
+            self.notify_server(f"{entry.message} Retrying automatically every {RETRY_DELAYS[-1]} s.")
+        timer = threading.Timer(calculate_retry_delay(entry), self.retry_failed, kwargs={"names": [name], "automatic": True})
         timer.daemon = True
         self.registry.record_retry_scheduled(name)
         self._timers[name] = timer
@@ -169,3 +174,4 @@ class ServerSupervisor:
         timer = self._timers.pop(name, None)
         if timer is not None:
             timer.cancel()
+        self.registry.record_retry_unscheduled(name)

@@ -10,6 +10,8 @@ import pytest
 
 from src.elitea_mcp.utils import client_identity
 from src.elitea_mcp.utils import server_controller as controller_module
+from src.elitea_mcp.utils import sio as sio_module
+from src.elitea_mcp.utils.server_loader import EXITED, ServerFailure, ServerStartError
 from src.elitea_mcp.utils.session_manager import SessionManager
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -137,3 +139,15 @@ def test_a_restart_during_a_slow_start_ends_the_old_run_and_keeps_the_new_one_ru
         supervisors[0].stop.assert_called_once_with()
         assert controller.is_running is True
         controller.stop_servers()
+
+
+@pytest.mark.parametrize("error", [TimeoutError(), ServerStartError(ServerFailure(EXITED, "exited during start"))])
+def test_a_stateful_call_that_timed_out_or_could_not_start_is_not_run_again_stateless(error):
+    manager = sio_module.get_session_manager()
+
+    with patch.object(manager, "call_tool_with_recovery_sync", side_effect=error) as stateful, \
+            patch.object(manager, "_run_in_loop") as stateless, pytest.raises(type(error)):
+        sio_module._mcp_tools_call_sync({"command": "x", "stateful": True}, {"name": "t", "arguments": {}}, server_name="kept")
+
+    stateful.assert_called_once()
+    stateless.assert_not_called()

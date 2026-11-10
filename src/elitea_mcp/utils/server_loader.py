@@ -1,11 +1,13 @@
 """Load every local MCP server on its own, so one broken server never stops or hangs the others."""
 import asyncio
+import email.utils
 import math
 import os
 import re
 import shutil
 import sys
 import tempfile
+import time
 import urllib.parse
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -34,6 +36,7 @@ MIN_SECRET_LENGTH = 4
 LOCAL_URL_PATTERN = re.compile(r"https?://\S+?(?=[.,:;)\"']*(?:\s|$))")
 URL_PATTERN = re.compile(r"(https?://)(?:[^\s/@?#]*@)?([^\s/?#]+?)(?:[/?#]\S*?)?(?=[.,:;)\"']*(?:\s|$))")
 AUTH_STATUS_CODES = (401, 403)
+SLOW_DOWN_STATUS_CODES = (429, 503)
 ON_WINDOWS = os.name == "nt"
 INSTALL_HINTS = {
     "npx": "Install Node.js",
@@ -50,6 +53,7 @@ class ServerFailure:
     kind: str
     reason: str
     hint: str = ""
+    retry_after: Optional[float] = None
 
     def describe(self, name, transport):
         """Name the server, its reason and what to do, as one line for notifications, the console and the platform."""
@@ -202,7 +206,8 @@ def identify_failure(error, server_conf, startup_timeout):
         label = f"{leaf.response.status_code} {leaf.response.reason_phrase}".strip()
         if leaf.response.status_code in AUTH_STATUS_CODES:
             return ServerFailure(AUTH, label, 'Check the token in "headers".')
-        return ServerFailure(UNREACHABLE, f"{server_conf.get('url', '')} answered {label}", 'Check "url".')
+        return ServerFailure(UNREACHABLE, f"{server_conf.get('url', '')} answered {label}", 'Check "url".',
+                             retry_after=read_retry_after(leaf.response))
     if isinstance(leaf, httpx.LocalProtocolError):
         return ServerFailure(INVALID_CONFIG, 'a name or value in "headers" is not valid in HTTP',
                              "Remove spaces and line breaks around it in config.json.")
@@ -210,6 +215,18 @@ def identify_failure(error, server_conf, startup_timeout):
         return ServerFailure(UNREACHABLE, f"cannot reach {server_conf.get('url', '')}: {describe_connect_error(leaf)}",
                              'Check "url" and that the server is running.')
     return ServerFailure(EXITED, "exited during start", 'Check its "command", "args" and "env".')
+
+
+def read_retry_after(response):
+    """Seconds a 429 or 503 answer asks the client to wait before trying again (RFC 9110 Retry-After), or None."""
+    value = response.headers.get("retry-after", "").strip() if response.status_code in SLOW_DOWN_STATUS_CODES else ""
+    if value.isdigit():
+        return float(value)
+    try:
+        moment = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, moment.timestamp() - time.time())
 
 
 def find_leaf_exception(error):

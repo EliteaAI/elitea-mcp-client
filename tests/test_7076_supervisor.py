@@ -8,7 +8,8 @@ from src.elitea_mcp.commands import run_servers as run_servers_module
 from src.elitea_mcp.config_model import check_config
 from src.elitea_mcp.utils import server_supervisor as supervisor_module
 from src.elitea_mcp.utils.server_loader import AUTH, COMMAND_NOT_FOUND, EXITED, TIMEOUT, ServerFailure, ServerLoad
-from src.elitea_mcp.utils.server_registry import FAILED, HEALTHY
+from src.elitea_mcp.utils import server_registry as registry_module
+from src.elitea_mcp.utils.server_registry import FAILED, HEALTHY, ServerRegistry
 from src.elitea_mcp.utils.server_supervisor import ServerSupervisor, collect_skipped_servers
 from tests import fixtures_7076 as fixtures
 
@@ -108,20 +109,69 @@ def test_retry_reloads_only_the_failed_servers_and_registers_the_recovered_one()
 
 
 @patch.object(supervisor_module, "RETRY_DELAYS", (0.05, 0.05))
-def test_a_timed_out_server_is_retried_automatically_until_the_retries_run_out():
+def test_a_timed_out_server_keeps_being_retried_at_the_last_delay_after_the_schedule():
     notify_server = MagicMock()
-    loads, calls = scripted_loads(*[[ServerLoad("ok", "stdio", tools=[]), failure_load("figma", TIMEOUT, "did not respond")]] * 3)
+    loads, calls = scripted_loads(*[[ServerLoad("ok", "stdio", tools=[]), failure_load("figma", TIMEOUT, "did not respond")]] * 6)
     platform, _ = fake_platform()
     supervisor = ServerSupervisor({**PLATFORM, "servers": {"ok": {}, "figma": {}}}, notify_server=notify_server)
 
     with loads, platform:
         supervisor.start()
-        wait_until(lambda: supervisor.registry.get("figma").retry_stopped)
+        wait_until(lambda: len(calls) >= 5)
+        wait_until(lambda: supervisor.registry.get("figma").format_menu_row()
+                   == "✗ figma — failed: did not respond (retrying automatically)")
+        supervisor.stop()
 
-    assert calls == [["figma", "ok"], ["figma"], ["figma"]]
-    assert supervisor.registry.get("figma").format_menu_row() == "✗ figma — failed: did not respond (retry stopped)"
-    notify_server.assert_called_with('Server "figma": did not respond. Fix it. Automatic retry stopped.')
-    supervisor.stop()
+    assert calls[:5] == [["figma", "ok"], ["figma"], ["figma"], ["figma"], ["figma"]]
+    assert [c.args[0] for c in notify_server.call_args_list].count(
+        'Server "figma": did not respond. Fix it. Retrying automatically every 0.05 s.') == 1
+
+
+@pytest.mark.parametrize("attempts, jitter, retry_after, expected", [
+    (0, 0.0, None, 15.0),
+    (0, 15.0, None, 30.0),
+    (9, 0.0, None, 150.0),
+    (9, 150.0, None, 300.0),
+    (0, 0.0, 120.0, 120.0),
+    (9, 150.0, 10.0, 300.0),
+])
+def test_each_wait_is_jittered_within_its_step_and_never_shorter_than_retry_after(attempts, jitter, retry_after, expected):
+    entry = MagicMock(retry_attempts=attempts, failure=ServerFailure(TIMEOUT, "slow", retry_after=retry_after))
+
+    with patch.object(supervisor_module.random, "uniform", return_value=jitter) as uniform:
+        assert supervisor_module.calculate_retry_delay(entry) == expected
+
+    step = supervisor_module.RETRY_DELAYS[min(attempts, len(supervisor_module.RETRY_DELAYS) - 1)]
+    uniform.assert_called_once_with(0, step / 2)
+
+
+def test_a_server_that_breaks_again_soon_after_recovering_keeps_its_long_wait():
+    registry = ServerRegistry()
+    registry.record_load(failure_load("api", TIMEOUT))
+    for _ in range(4):
+        registry.record_retry_scheduled("api")
+    failure = ServerFailure(TIMEOUT, "slow")
+
+    with patch.object(registry_module.time, "monotonic", return_value=1000.0):
+        registry.record_load(ServerLoad("api", "http", tools=[]))
+    with patch.object(registry_module.time, "monotonic", return_value=1000.0 + registry_module.HEALTHY_PERIOD_THAT_RESETS_RETRIES - 1):
+        registry.record_transport_failure("api", failure)
+        registry.record_transport_failure("api", failure)
+    assert registry.get("api").retry_attempts == 4
+
+    with patch.object(registry_module.time, "monotonic", return_value=5000.0):
+        registry.record_load(ServerLoad("api", "http", tools=[]))
+    with patch.object(registry_module.time, "monotonic", return_value=5000.0 + registry_module.HEALTHY_PERIOD_THAT_RESETS_RETRIES):
+        registry.record_transport_failure("api", failure)
+        registry.record_transport_failure("api", failure)
+    assert registry.get("api").retry_attempts == 0
+
+
+def test_a_failure_that_cannot_fix_itself_shows_no_automatic_retry():
+    registry = ServerRegistry()
+    registry.record_load(failure_load("github", COMMAND_NOT_FOUND, 'command "npx" not found'))
+
+    assert registry.get("github").format_menu_row() == '✗ github — failed: command "npx" not found'
 
 
 @patch.object(supervisor_module, "RETRY_DELAYS", (0.05,))
@@ -305,3 +355,30 @@ def test_a_retry_that_finishes_before_the_platform_answers_still_registers_the_s
 
     link.sync.assert_called_once_with(["flaky"])
     supervisor.stop()
+
+
+def test_no_row_claims_a_retry_when_every_server_failed_at_start_and_none_is_scheduled():
+    loads, _ = scripted_loads([failure_load("a", TIMEOUT, "did not respond within 30 s")])
+    platform, _ = fake_platform()
+    supervisor = ServerSupervisor({**PLATFORM, "servers": {"a": {}}})
+
+    with loads, platform:
+        assert supervisor.start() is False
+
+    assert supervisor._timers == {}
+    assert supervisor.registry.get("a").format_menu_row() == "✗ a — failed: did not respond within 30 s"
+
+
+@patch.object(supervisor_module, "RETRY_DELAYS", (30,))
+def test_a_row_says_retrying_only_while_a_retry_is_pending():
+    loads, _ = scripted_loads([ServerLoad("ok", "stdio", tools=[]), failure_load("figma", TIMEOUT, "slow")])
+    platform, _ = fake_platform()
+    supervisor = ServerSupervisor({**PLATFORM, "servers": {"ok": {}, "figma": {}}})
+
+    with loads, platform:
+        supervisor.start()
+        pending = supervisor.registry.get("figma").format_menu_row()
+        supervisor.stop()
+
+    assert pending == "✗ figma — failed: slow (retrying automatically)"
+    assert supervisor.registry.get("figma").format_menu_row() == "✗ figma — failed: slow"

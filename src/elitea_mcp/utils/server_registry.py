@@ -1,5 +1,6 @@
 """The state of every configured server in this run: the one source for the tray, the console and platform snapshots."""
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -11,6 +12,7 @@ FAILED = "failed"
 REGISTERED = "registered"
 DECLINED = "declined"
 FAILURES_BEFORE_MARKED_FAILED = 2
+HEALTHY_PERIOD_THAT_RESETS_RETRIES = 600
 NEVER_RETRIED = frozenset({COMMAND_NOT_FOUND, INVALID_CONFIG, AUTH})
 TRANSIENT_AT_START = frozenset({TIMEOUT, UNREACHABLE})
 DECLINE_REASONS = {"name_already_registered": "name already registered", "invalid_name": "invalid name"}
@@ -29,7 +31,8 @@ class ServerEntry:
     transport_failures: int = 0
     was_healthy: bool = False
     retry_attempts: int = 0
-    retry_stopped: bool = False
+    retry_scheduled: bool = False
+    healthy_since: Optional[float] = None
 
     @property
     def message(self):
@@ -44,7 +47,7 @@ class ServerEntry:
 
     def describe_status(self):
         if self.status == FAILED:
-            suffix = " (retry stopped)" if self.retry_stopped else ""
+            suffix = " (retrying automatically)" if self.retry_scheduled else ""
             return f"failed: {self.failure.reason}{suffix}"
         if self.status == PENDING:
             return "starting"
@@ -85,7 +88,7 @@ class ServerRegistry:
             entry.transport_failures = 0
             if load.ok:
                 entry.status, entry.tools, entry.failure, entry.stderr_tail = HEALTHY, load.tools, None, []
-                entry.was_healthy, entry.retry_attempts, entry.retry_stopped = True, 0, False
+                entry.was_healthy, entry.healthy_since = True, time.monotonic()
             else:
                 entry.status, entry.tools, entry.failure, entry.stderr_tail = FAILED, [], load.failure, load.stderr_tail
         self._on_change()
@@ -100,7 +103,8 @@ class ServerRegistry:
             if entry.transport_failures < FAILURES_BEFORE_MARKED_FAILED:
                 return False
             entry.status, entry.failure, entry.stderr_tail = FAILED, failure, list(stderr_tail)
-            entry.retry_attempts, entry.retry_stopped = 0, False
+            if entry.healthy_since is not None and time.monotonic() - entry.healthy_since >= HEALTHY_PERIOD_THAT_RESETS_RETRIES:
+                entry.retry_attempts = 0
         self._on_change()
         return True
 
@@ -123,15 +127,21 @@ class ServerRegistry:
     def record_retry_scheduled(self, name):
         with self._lock:
             self._entries[name].retry_attempts += 1
+            self._entries[name].retry_scheduled = True
+        self._on_change()
+
+    def record_retry_unscheduled(self, name):
+        """No automatic retry is pending any more: it is running, was cancelled, or the run stopped."""
+        with self._lock:
+            entry = self._entries.get(name)
+            if entry is None or not entry.retry_scheduled:
+                return
+            entry.retry_scheduled = False
+        self._on_change()
 
     def reset_retries(self, name):
         with self._lock:
-            self._entries[name].retry_attempts, self._entries[name].retry_stopped = 0, False
-
-    def record_retry_stopped(self, name):
-        with self._lock:
-            self._entries[name].retry_stopped = True
-        self._on_change()
+            self._entries[name].retry_attempts = 0
 
     def apply_registration(self, sent_names, registered, declined, keep_own_names=False):
         """Record the platform's answer; on an old platform a decline of a name this client already holds still counts as registered."""

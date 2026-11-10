@@ -1,8 +1,12 @@
 import asyncio
+import email.utils
+import http.server
 import os
+import threading
 import time
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from src.elitea_mcp.config_model import check_config
@@ -257,3 +261,47 @@ def test_a_failing_servers_bracketed_url_in_its_output_never_stops_the_other_ser
     assert supervisor.registry.get("ok").status == "healthy"
     assert "proxy target: [http://localhost:3000]" in supervisor.format_error_report("proxy")
     assert supervisor.read_console_output("proxy") == ["proxy target: [http://localhost:3000]"]
+
+
+class SlowDownHandler(http.server.BaseHTTPRequestHandler):
+    retry_after = "120"
+
+    def do_POST(self):
+        self.send_response(429)
+        self.send_header("Retry-After", self.retry_after)
+        self.end_headers()
+
+    do_GET = do_POST
+
+    def log_message(self, *args):
+        """Keep request logs out of the test output."""
+
+
+def test_a_server_that_answers_429_says_how_long_to_wait_before_the_next_retry():
+    server = http.server.HTTPServer(("127.0.0.1", 0), SlowDownHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    results = load({"api": {"type": "http", "url": f"http://127.0.0.1:{server.server_address[1]}/mcp", "headers": {}}})
+
+    server.shutdown()
+    assert results["api"].failure.kind == UNREACHABLE
+    assert results["api"].failure.retry_after == 120.0
+
+
+@pytest.mark.parametrize("status, header, expected", [
+    (429, "30", 30.0),
+    (503, "Wed, 21 Oct 2015 07:28:00 GMT", 0.0),
+    (429, "", None),
+    (429, "soon", None),
+    (404, "30", None),
+])
+def test_retry_after_is_read_as_seconds_or_a_date_only_from_slow_down_answers(status, header, expected):
+    response = httpx.Response(status, headers={"Retry-After": header} if header else {})
+
+    assert server_loader.read_retry_after(response) == expected
+
+
+def test_retry_after_given_as_a_future_date_is_the_seconds_until_then():
+    in_a_minute = email.utils.formatdate(time.time() + 60, usegmt=True)
+
+    assert 55 <= server_loader.read_retry_after(httpx.Response(429, headers={"Retry-After": in_a_minute})) <= 60

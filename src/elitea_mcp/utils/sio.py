@@ -413,6 +413,8 @@ def _mcp_tools_call_sync(server_conf, params, server_name=None, startup_timeout=
         try:
             result = session_manager.call_tool_with_recovery_sync(server_name, server_conf, params)
             return result
+        except (TimeoutError, ServerStartError):
+            raise
         except Exception as e:
             print(f"Failed to call tool with stateful session: {e}")
             print("Falling back to stateless session...")

@@ -1,15 +1,17 @@
 import asyncio
 import atexit
 import threading
+from contextlib import AsyncExitStack
 from typing import Dict, Optional, Tuple, Any, Union
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.sse import sse_client
-from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+from mcp import ClientSession, types
 
-from ..config_model import DEFAULT_TIMEOUT
+from ..config_model import DEFAULT_STARTUP_TIMEOUT, DEFAULT_TIMEOUT
+from .server_loader import open_session, read_startup_timeout
 from .tool_result import render_tool_result
+
+TEARDOWN_MARGIN = 5
+MAX_CALL_ATTEMPTS = 2
 
 
 class SessionManager:
@@ -22,6 +24,8 @@ class SessionManager:
         self._loop_thread: Optional[threading.Thread] = None
         self._loop_running = threading.Event()
         self.timeout = DEFAULT_TIMEOUT
+        self.startup_timeout = DEFAULT_STARTUP_TIMEOUT
+        self.on_tools_changed = None
         # Register cleanup on exit
         atexit.register(self.cleanup_all)
     
@@ -49,14 +53,14 @@ class SessionManager:
                 # Wait for loop to be ready
                 self._loop_running.wait(timeout=5.0)
     
-    def _run_in_loop(self, coro):
-        """Run a coroutine in the managed event loop."""
+    def _run_in_loop(self, coro, timeout=None):
+        """Run a coroutine in the managed event loop, waiting at most `timeout` seconds (the tool timeout by default)."""
         self._ensure_event_loop()
         if self._event_loop is None:
             raise RuntimeError("Event loop not available")
         
         future = asyncio.run_coroutine_threadsafe(coro, self._event_loop)
-        return future.result(timeout=self.timeout)
+        return future.result(timeout=timeout or self.timeout)
     
     def get_session_sync(self, server_name: str, server_conf: dict) -> ClientSession:
         """Synchronous wrapper for get_session."""
@@ -68,7 +72,21 @@ class SessionManager:
     
     def call_tool_with_recovery_sync(self, server_name: str, server_conf: dict, params: dict) -> Union[str, dict]:
         """Synchronous wrapper for call_tool_with_recovery."""
-        return self._run_in_loop(self.call_tool_with_recovery(server_name, server_conf, params))
+        return self._run_in_loop(self.call_tool_with_recovery(server_name, server_conf, params),
+                                 timeout=self.calculate_stateful_call_budget(server_conf))
+
+    def calculate_stateless_call_budget(self, server_conf: dict) -> int:
+        """Seconds a call may take when the server is started for it: the start, the call and the SDK's teardown."""
+        return read_startup_timeout(server_conf, self.startup_timeout) + self.timeout + TEARDOWN_MARGIN
+
+    def calculate_stateful_call_budget(self, server_conf: dict) -> int:
+        return MAX_CALL_ATTEMPTS * (read_startup_timeout(server_conf, self.startup_timeout) + TEARDOWN_MARGIN) + self.timeout
+
+    def calculate_call_budget(self, server_conf: dict) -> int:
+        """The longest this client works on one call to the server, which the platform must wait for."""
+        if self.is_stateful(server_conf):
+            return self.calculate_stateful_call_budget(server_conf)
+        return self.calculate_stateless_call_budget(server_conf)
 
     async def get_session(self, server_name: str, server_conf: dict) -> ClientSession:
         """Get or create a session for the given server."""
@@ -79,55 +97,37 @@ class SessionManager:
                 print(f"Reusing existing session for server: {server_name}")
                 return session
             
-            # Create new session
+            stack = AsyncExitStack()
             try:
-                if server_conf.get("type", "stdio").lower() == "stdio":
-                    server_parameters = StdioServerParameters(**server_conf)
-                    stdio_ctx = stdio_client(server_parameters)
-                    read, write = await stdio_ctx.__aenter__()
-                    
-                    session_ctx = ClientSession(read, write)
-                    session = await session_ctx.__aenter__()
-                    await session.initialize()
-                    
-                    # Store the context managers and session
-                    self._sessions[server_name] = (stdio_ctx, session_ctx, session)
-                    print(f"Created persistent session for stdio server: {server_name}")
-
-                elif server_conf["type"].lower() == "http":
-                    http_ctx = streamablehttp_client(server_conf["url"], server_conf.get("headers", {}))
-                    read_stream, write_stream, _ = await http_ctx.__aenter__()
-
-                    session_ctx = ClientSession(read_stream, write_stream)
-                    session = await session_ctx.__aenter__()
-                    await session.initialize()
-
-                    # Store the context managers and session
-                    self._sessions[server_name] = (http_ctx, session_ctx, session)
-                    print(f"Created persistent session for HTTP server: {server_name}")
-                    
-                elif server_conf["type"].lower() == "sse":
-                    sse_ctx = sse_client(server_conf["url"], server_conf.get("headers", {}))
-                    streams = await sse_ctx.__aenter__()
-                    
-                    session_ctx = ClientSession(*streams)
-                    session = await session_ctx.__aenter__()
-                    await session.initialize()
-                    
-                    # Store the context managers and session
-                    self._sessions[server_name] = (sse_ctx, session_ctx, session)
-                    print(f"Created persistent session for SSE server: {server_name}")
-                else:
-                    raise ValueError(f"Unsupported server type: {server_conf['type']}")
-                
-                return self._sessions[server_name][2]
+                session = await stack.enter_async_context(
+                    open_session(server_conf, read_startup_timeout(server_conf, self.startup_timeout),
+                                 message_handler=self.create_message_handler(server_name)))
             except Exception as e:
                 print(f"Failed to create session for {server_name}: {e}")
-                # Clean up any partial state
-                if server_name in self._sessions:
-                    del self._sessions[server_name]
+                await stack.aclose()
                 raise
-    
+            self._sessions[server_name] = (stack, None, session)
+            print(f"Created persistent session for {server_conf.get('type', 'stdio')} server: {server_name}")
+            return session
+
+    def create_message_handler(self, server_name: str):
+        """Re-list a stateful server's tools when it announces a change, outside the session's receive loop."""
+        async def handle_message(message):
+            if isinstance(message, types.ServerNotification) and isinstance(message.root, types.ToolListChangedNotification):
+                asyncio.get_running_loop().create_task(self.report_tools(server_name))
+        return handle_message
+
+    async def report_tools(self, server_name: str):
+        session_entry = self._sessions.get(server_name)
+        if session_entry is None or self.on_tools_changed is None:
+            return
+        try:
+            tools = await asyncio.wait_for(session_entry[2].list_tools(), self.timeout)
+        except Exception as e:
+            print(f"Could not list the changed tools of {server_name}: {e}")
+            return
+        self.on_tools_changed(server_name, [tool.model_dump() for tool in tools.tools])
+
     async def cleanup_session(self, server_name: str):
         """Clean up a specific session."""
         with self._lock:
@@ -210,12 +210,14 @@ class SessionManager:
     
     async def call_tool_with_recovery(self, server_name: str, server_conf: dict, params: dict) -> Union[str, dict]:
         """Call a tool with automatic session recovery on failure."""
-        max_retries = 2
+        max_retries = MAX_CALL_ATTEMPTS
         for attempt in range(max_retries):
             try:
                 session = await self.get_session(server_name, server_conf)
-                tool_result = await session.call_tool(params["name"], params["arguments"])
+                tool_result = await asyncio.wait_for(session.call_tool(params["name"], params["arguments"]), self.timeout)
                 return render_tool_result(tool_result)
+            except TimeoutError:
+                raise
             except Exception as e:
                 print(f"Error calling tool on attempt {attempt + 1}: {e}")
                 if attempt < max_retries - 1:

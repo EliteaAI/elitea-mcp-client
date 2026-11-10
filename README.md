@@ -1,6 +1,6 @@
 # EliteA MCP Client
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![PyPI version](https://badge.fury.io/py/elitea-mcp.svg)](https://badge.fury.io/py/elitea-mcp)
 
@@ -97,7 +97,7 @@ elitea-mcp tray
 
 ### Prerequisites
 
-- Python 3.10 or higher
+- Python 3.11 or higher
 - pip or pipx package manager
 
 ### Method 1: Using pipx (Recommended)
@@ -197,6 +197,17 @@ Right-click the tray icon to access:
 - **Start MCP Server (Daemon)** - Run servers as background daemon
 - **Stop MCP Server** - Stop running servers (shows current mode)
 - **Restart MCP Server** - Reload configuration by stopping and starting servers
+
+#### Servers
+Shown after the first start, with one row per configured server:
+- `✓ jira — 14 tools, registered` - the server runs and ELITEA has its tools
+- `⚠ github — declined (name already registered)` - another running client, or a session that has not timed out yet, holds this name in the project
+- `✗ confluence — failed: command "uvx" not found` - the server could not start; the other servers are not affected
+
+Click a failed or declined row to open `<server>-error.txt` (next to the tray log) with the reason, a hint and the server's last output, with configured secrets (`auth_token`, `env` and `headers` values) replaced by `****`. In these messages a server URL keeps its host and path, its user name and password are removed, and every query and fragment value is shown as `****`. A token written into the URL path (for example `https://mcp.example.com/s/<token>/mcp`) stays visible on this machine; ELITEA only ever receives the URL's scheme and host.
+**Retry Failed Servers** loads only the failed servers again; healthy ones keep running. A server that timed out, could not be reached, or broke after it was working is also retried automatically after about 30 s, 1 min, 2 min and 5 min, then every 5 min for as long as the problem lasts; its row shows `(retrying automatically)` while a retry is pending. When every server fails at start the client does not connect and does not retry on its own; use **Retry Failed Servers**. Each wait is randomised (between half and all of the step) so clients that lost the same server do not all retry at once, and a server that answers 429 or 503 with `Retry-After` is not tried again sooner than it asked. A server that fails again within 10 min of recovering keeps the longer wait. A missing command, an invalid config or a rejected token is never retried automatically.
+
+After a start, a notification summarises the result, for example `3 of 4 MCP servers connected. Failed: confluence (command "uvx" not found).` When every server fails, the client does not connect to ELITEA.
 
 #### Configuration
 - **Open Config File** - Edit JSON configuration in default text editor
@@ -304,6 +315,8 @@ The client stores configuration in your OS's standard app data directory:
 - **macOS**: `~/Library/Application Support/elitea-mcp-client`
 - **Linux**: `~/.config/elitea-mcp-client`
 
+Next to `config.json` the client keeps `client_id`, which tells ELITEA that a reconnecting or restarted client is the same installation. It is tied to the machine: a copy on another machine is replaced by a new id. A second copy of the client running at the same time (for example the tray and `elitea-mcp serve`) uses a temporary id, so its servers with the same names are declined instead of taking over the first copy's.
+
 ### Bootstrap Configuration
 
 #### Interactive Mode
@@ -340,12 +353,15 @@ elitea-mcp bootstrap \
   "project_id": 123,
   "host": "0.0.0.0",
   "port": 8000,
+  "timeout": 30,
+  "startup_timeout": 30,
   "servers": {
     "server1": {
       "command": "python",
       "args": ["-m", "mcp_server"],
       "env": {},
-      "stateful": false
+      "stateful": false,
+      "startup_timeout": 120
     },
     "remote_server": {
       "type": "http",
@@ -358,6 +374,8 @@ elitea-mcp bootstrap \
 
 - A server without `type` is a local `stdio` server. A remote server needs `"type": "http"` (Streamable HTTP) or `"type": "sse"`; `headers` is optional.
 - Snippets written for other MCP clients often use `mcpServers` instead of `servers`; the client reads it when `servers` is missing, but rename it to `servers`.
+- Each server is started on its own. `startup_timeout` (seconds, default 30) is how long a server may take to start and answer before it is reported as timed out; set it at the top level for all servers or per server, for example for an `npx` package that downloads on first run. `timeout` (default 30) stays the limit for listing tools and for each tool call.
+- A server that fails to start is reported with its name, reason and a hint, and skipped; the healthy servers are registered in ELITEA. `elitea-mcp serve` prints a table of all servers and the last lines a failed server wrote. A tool call to a server that cannot start is answered at once with a named error; after two such failures in a row the server is marked failed. On an ELITEA version that supports it, a server marked failed is also removed from ELITEA until it recovers, and a stateful server that announces new tools has them updated in ELITEA.
 - `"$schema"` gives autocompletion and inline checks in editors that read JSON Schema (VS Code, JetBrains). The client writes `config.schema.json` for its installed version next to `config.json`.
 
 ## 🔄 Server Management

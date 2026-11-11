@@ -206,7 +206,8 @@ def write_server_details(context, load):
 
 
 def check_environment(context):
-    return ([check_port(context)] if context.config is not None else []) + check_running_client(context)
+    return ([check_port(context)] if context.config is not None else []) + check_running_client(context) + [
+        ok("Logs", str(context.error_dir))]
 
 
 def check_port(context):

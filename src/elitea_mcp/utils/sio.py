@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import tempfile
 import threading
@@ -23,6 +24,13 @@ SYNC_ATTEMPTS = 3
 RESYNC_DELAY = 60
 PROTOCOL = 2
 DECLINED_NOTIFICATION_SUFFIX = " - declined."
+MAX_LOGGED_NAME_CHARS = 200
+CALL_OK = "ok"
+CALL_TOOL_ERROR = "tool_error"
+CALL_START_FAILED = "start_failed"
+CALL_FAILED = "failed"
+CALL_SERVER_FAILED = "server_failed"
+CALL_NOT_RUNNING = "not_running"
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +177,7 @@ class PlatformLink:
             self.sio.disconnect()
             raise
         self.registered = True
-        print("Connected to platform")
+        logger.info("Connected to platform")
         self.notify_status("Connected to platform")
         threading.Thread(target=self.sio.wait, daemon=True).start()
 
@@ -266,7 +274,7 @@ class PlatformLink:
         if self.sio.get_sid() != connection_sid:
             return
         if self._reregistering:
-            print(f"Failed to register on platform: {error}")
+            logger.warning(f"Failed to register on platform: {error}")
             self.notify_error(str(error))
             self.sio.disconnect()
             return
@@ -274,7 +282,7 @@ class PlatformLink:
 
     def schedule_resync(self, names, error):
         """Keep the socket, so the platform keeps the last state it accepted, and try the update again later."""
-        print(f"Failed to update the platform: {error}")
+        logger.warning(f"Failed to update the platform: {error}")
         if not self._update_failing:
             self._update_failing = True
             self.notify_status(f"Could not update the platform: {error} Retrying in {RESYNC_DELAY} s.")
@@ -297,7 +305,7 @@ class PlatformLink:
         self._update_failing = False
         if self._reregistering:
             self._reregistering = False
-            print("Connected to platform")
+            logger.info("Connected to platform")
             self.notify_status("Connected to platform")
 
     def on_connect(self):
@@ -308,20 +316,20 @@ class PlatformLink:
 
     def on_disconnect(self, reason):
         if reason == self.sio.reason.CLIENT_DISCONNECT:
-            print("Disconnected from platform")
+            logger.info("Disconnected from platform")
             self.notify_status("Disconnected from platform")
         elif reason == self.sio.reason.SERVER_DISCONNECT:
-            print("Disconnected by the platform")
+            logger.warning("Disconnected by the platform")
             self.notify_error("Disconnected by the platform")
         else:
-            print("Connection lost, reconnecting...")
+            logger.warning("Connection lost, reconnecting...")
             self.notify_status("Connection lost, reconnecting...")
         session_manager = get_session_manager()
         try:
             session_manager.cleanup_all()
-            print("Cleaned up persistent sessions")
+            logger.info("Cleaned up persistent sessions")
         except Exception as e:
-            print(f"Error during session cleanup: {e}")
+            logger.warning(f"Error during session cleanup: {e}")
 
     def on_mcp_tools_list(self, data):
         """Answer the legacy pull with the servers that load now; nothing on the platform sends it any more."""
@@ -334,16 +342,25 @@ class PlatformLink:
         }
 
     def on_mcp_tools_call(self, data):
-        """Always answer, so a broken server costs the agent a named error instead of the platform's whole timeout."""
+        """Always answer, so a broken server costs the agent a named error instead of the platform's whole timeout; log one line per call."""
+        started = time.monotonic()
         data = data if isinstance(data, dict) else {}
         name = data.get("server")
         params = data.get("params") or {}
+        status, result = CALL_FAILED, None
+        try:
+            status, result = self.answer_tool_call(name, params)
+            return result
+        finally:
+            log_tool_call(name, params, status, started, result)
+
+    def answer_tool_call(self, name, params):
         server_conf = self.config["servers"].get(name)
         if server_conf is None:
-            return build_error_result(f'Server "{name}" is not running in this MCP client.')
+            return CALL_NOT_RUNNING, build_error_result(f'Server "{name}" is not running in this MCP client.')
         entry = self.registry.get(name)
         if entry is not None and entry.status == FAILED:
-            return build_error_result(redact_urls(entry.message))
+            return CALL_SERVER_FAILED, build_error_result(redact_urls(entry.message))
         try:
             result = _mcp_tools_call_sync(server_conf, params, server_name=name,
                                           startup_timeout=read_startup_timeout(server_conf, self.startup_timeout))
@@ -352,18 +369,20 @@ class PlatformLink:
             logger.warning(mask_url_secrets(message))
             if self.registry.record_transport_failure(name, error.failure, error.stderr_tail):
                 self.on_server_failed(name)
-            return build_error_result(redact_urls(message))
+            return CALL_START_FAILED, build_error_result(redact_urls(message))
         except Exception as error:
             leaf = find_leaf_exception(error)
-            message = f'Server "{name}": tool "{params.get("name")}" failed: {str(leaf) or type(leaf).__name__}'
+            message = (f'Server {render_log_name(name)}: tool {render_log_name(params.get("name"))} failed: '
+                       f'{str(leaf) or type(leaf).__name__}')
             logger.warning(mask_url_secrets(message))
-            return build_error_result(redact_urls(message))
+            return CALL_FAILED, build_error_result(redact_urls(message))
         self.registry.record_call_success(name)
-        return result
+        return (CALL_TOOL_ERROR if isinstance(result, dict) and result.get("isError") else CALL_OK), result
 
     def on_mcp_notification(self, notification):
-        print(f"Platform Notification: {notification}")
-        if isinstance(notification, str) and notification.endswith(DECLINED_NOTIFICATION_SUFFIX):
+        declined = isinstance(notification, str) and notification.endswith(DECLINED_NOTIFICATION_SUFFIX)
+        logger.log(logging.WARNING if declined else logging.INFO, f"Platform Notification: {notification}")
+        if declined:
             server_name = notification[:-len(DECLINED_NOTIFICATION_SUFFIX)]
             self.notify_status(
                 f'Server "{server_name}" was declined: a server with this name is already registered in project '
@@ -374,11 +393,27 @@ class PlatformLink:
         return True
 
 
+def log_tool_call(name, params, status, started, result):
+    """One line per call with names only: arguments and results are user data that masking cannot recognise."""
+    duration_ms = round((time.monotonic() - started) * 1000)
+    logger.info(f"Tool call: server={render_log_name(name)} tool={render_log_name(params.get('name'))} "
+                f"status={status} duration_ms={duration_ms}")
+    if logger.isEnabledFor(logging.DEBUG):
+        arguments = params.get("arguments")
+        logger.debug(f"Tool call: argument keys={sorted(map(str, arguments)) if isinstance(arguments, dict) else []} "
+                     f"result chars={len(str(result)) if result is not None else 0}")
+
+
+def render_log_name(value):
+    """A server or tool name as quoted JSON of bounded length, so a name sent by the platform cannot forge log lines."""
+    return json.dumps(str(value)[:MAX_LOGGED_NAME_CHARS])
+
+
 def create_socket_client(config):
     if is_ssl_verification_enabled(config):
-        print("SSL verification enabled for SocketIO connection")
+        logger.info("SSL verification enabled for SocketIO connection")
         return socketio.Client()
-    print("SSL verification disabled for SocketIO connection")
+    logger.info("SSL verification disabled for SocketIO connection")
     return socketio.Client(ssl_verify=False, logger=False, engineio_logger=False)
 
 
@@ -395,7 +430,7 @@ def _connect_with_retries(sio, config, notify_status):
             if attempt < CONNECT_ATTEMPTS:
                 notify_status(f"Cannot connect to platform ({error}), retrying (attempt {attempt + 1}/{CONNECT_ATTEMPTS})...")
                 time.sleep(CONNECT_RETRY_DELAY * attempt)
-    print(f"Failed to connect to platform: {last_error}")
+    logger.error(f"Failed to connect to platform: {last_error}")
     raise PlatformConnectionError(f"Could not connect to {config['deployment_url']} after {CONNECT_ATTEMPTS} attempts: {last_error}")
 
 
@@ -416,20 +451,19 @@ def _mcp_tools_call_sync(server_conf, params, server_name=None, startup_timeout=
         except (TimeoutError, ServerStartError):
             raise
         except Exception as e:
-            print(f"Failed to call tool with stateful session: {e}")
-            print("Falling back to stateless session...")
+            logger.warning(f"Failed to call tool with stateful session: {e}. Falling back to stateless session.")
             # Fall through to stateless mode as fallback
     
     # Use stateless session (original behavior) via async wrapper
     async def _stateless_call():
-        return await _mcp_tools_call(server_conf, params, startup_timeout)
+        return await _mcp_tools_call(server_conf, params, startup_timeout, server_name)
     
     # Run in session manager's event loop to avoid conflicts
     return session_manager._run_in_loop(_stateless_call(), timeout=session_manager.calculate_stateless_call_budget(
         {**server_conf, "startup_timeout": startup_timeout}))
 
 
-async def _mcp_tools_call(server_conf, params, startup_timeout=DEFAULT_STARTUP_TIMEOUT):
+async def _mcp_tools_call(server_conf, params, startup_timeout=DEFAULT_STARTUP_TIMEOUT, server_name=None):
     """Start the server for one call, as servers that are not stateful are not kept running."""
     with tempfile.TemporaryFile("w+b") as errlog:
         try:
@@ -438,4 +472,4 @@ async def _mcp_tools_call(server_conf, params, startup_timeout=DEFAULT_STARTUP_T
                                                      get_session_manager().timeout)
                 return render_tool_result(tool_result)
         finally:
-            replay_stderr(errlog)
+            replay_stderr(errlog, server_name)

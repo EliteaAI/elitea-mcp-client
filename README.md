@@ -200,6 +200,21 @@ Right-click the tray icon to access:
 
 #### Help
 - **Run Diagnostics** - Run every `elitea-mcp doctor` check, open the report and copy it to the clipboard
+- **Open Log File** - Open the tray log
+- **Open Logs Folder** - Open the folder with the logs, the `<server>-error.txt` files and the diagnostics report
+- **Debug Logging** - Add detail to the logs at once, without a restart; saved as `"log_level"` in `config.json`
+
+#### Logs
+The logs are in `~/.local/var/log/elitea-mcp/` on macOS and Linux (`/var/log/elitea-mcp/` when run as root) and in `%TEMP%\elitea-mcp\` on Windows. The default folder and every log file can be read only by you.
+
+| File | Written by |
+|---|---|
+| `elitea-mcp-tray.log` | the tray and the servers it starts |
+| `elitea-mcp-tray-servers.log` | what those servers write to their error output |
+| `elitea-mcp-serve.log`, `elitea-mcp-serve-servers.log` | `elitea-mcp serve`, also in the foreground |
+| `elitea-mcp-tray.out`, `elitea-mcp-serve.out` | a daemon's crash output and anything written outside the log |
+
+Each log keeps 5 MB per file (5 old files for the main log, 3 for server output). Every tool call writes one line with the server, the tool, the result (`ok`, `tool_error`, `start_failed`, `failed`, `server_failed`, `not_running`) and the time it took. Configured secrets (`auth_token`, every `env` and `headers` value of 4 characters or more, also JSON-escaped, URL-encoded or line by line) and every URL query value and user name and password are replaced by `****` in every log line, so a short value such as `PORT=3000` is hidden as well. Tool arguments, tool results and agent conversations are never logged, not even with debug logging on; debug adds only argument names and sizes. `elitea-mcp run` writes no log file: its messages go to the error output, which your IDE keeps in its MCP log. `"log_level": "debug"` in `config.json`, or `ELITEA_MCP_DEBUG=1`, turns on debug logging for `run` too.
 
 #### Servers
 Shown after the first start, with one row per configured server:
@@ -541,7 +556,7 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ### Run the Doctor First
 
-`elitea-mcp doctor` (or **Help → Run Diagnostics** in the tray) checks the client version against PyPI, the config file, the platform (URL, SSL, token, project access), starts every local server once to list its tools, and reports the SSE port and any client already running with the same config:
+`elitea-mcp doctor` (or **Help → Run Diagnostics** in the tray) checks the client version against PyPI, the config file, the platform (URL, SSL, token, project access), starts every local server once to list its tools, and reports the SSE port, any client already running with the same config, and where the logs are:
 
 ```text
 ELITEA MCP doctor
@@ -552,6 +567,7 @@ ELITEA MCP doctor
       Install Node.js or use the full path in "command".
   ⚠ Running client: another client is running servers with this config; servers were started a second time for this check, so a server that holds a port may fail here only
   ⚠ Running session: "jira" (stdio): declined (name already registered)
+  ✓ Logs: /Users/you/.local/var/log/elitea-mcp
 
 1 problem, 2 warnings.
 ```

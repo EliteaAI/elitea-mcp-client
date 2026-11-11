@@ -1,5 +1,6 @@
 import asyncio
 import atexit
+import logging
 import threading
 from contextlib import AsyncExitStack
 from typing import Dict, Optional, Tuple, Any, Union
@@ -7,11 +8,14 @@ from typing import Dict, Optional, Tuple, Any, Union
 from mcp import ClientSession, types
 
 from ..config_model import DEFAULT_STARTUP_TIMEOUT, DEFAULT_TIMEOUT
-from .server_loader import open_session, read_startup_timeout
+from .server_loader import open_session, read_startup_timeout, read_transport
+from .server_output import ServerOutputPipe
 from .tool_result import render_tool_result
 
 TEARDOWN_MARGIN = 5
 MAX_CALL_ATTEMPTS = 2
+
+logger = logging.getLogger(__name__)
 
 
 class SessionManager:
@@ -94,20 +98,25 @@ class SessionManager:
             if server_name in self._sessions:
                 # Return existing session
                 _, _, session = self._sessions[server_name]
-                print(f"Reusing existing session for server: {server_name}")
+                logger.debug(f"Reusing existing session for server: {server_name}")
                 return session
             
             stack = AsyncExitStack()
+            output = ServerOutputPipe(server_name) if read_transport(server_conf) == "stdio" else None
             try:
                 session = await stack.enter_async_context(
                     open_session(server_conf, read_startup_timeout(server_conf, self.startup_timeout),
+                                 errlog=output.writer if output else None,
                                  message_handler=self.create_message_handler(server_name)))
             except Exception as e:
-                print(f"Failed to create session for {server_name}: {e}")
+                logger.warning(f"Failed to create session for {server_name}: {e}")
                 await stack.aclose()
                 raise
+            finally:
+                if output:
+                    output.close_writer()
             self._sessions[server_name] = (stack, None, session)
-            print(f"Created persistent session for {server_conf.get('type', 'stdio')} server: {server_name}")
+            logger.debug(f"Created persistent session for {server_conf.get('type', 'stdio')} server: {server_name}")
             return session
 
     def create_message_handler(self, server_name: str):
@@ -124,7 +133,7 @@ class SessionManager:
         try:
             tools = await asyncio.wait_for(session_entry[2].list_tools(), self.timeout)
         except Exception as e:
-            print(f"Could not list the changed tools of {server_name}: {e}")
+            logger.warning(f"Could not list the changed tools of {server_name}: {e}")
             return
         self.on_tools_changed(server_name, [tool.model_dump() for tool in tools.tools])
 
@@ -143,9 +152,9 @@ class SessionManager:
                     if hasattr(ctx1, '__aexit__'):
                         await ctx1.__aexit__(None, None, None)
                     
-                    print(f"Cleaned up session for server: {server_name}")
+                    logger.debug(f"Cleaned up session for server: {server_name}")
                 except Exception as e:
-                    print(f"Error cleaning up session for {server_name}: {e}")
+                    logger.warning(f"Error cleaning up session for {server_name}: {e}")
                 
                 del self._sessions[server_name]
     
@@ -154,7 +163,7 @@ class SessionManager:
         if not self._sessions:
             return
             
-        print("Cleaning up all persistent sessions...")
+        logger.debug("Cleaning up all persistent sessions...")
         try:
             # Use our dedicated event loop for cleanup
             if self._event_loop and not self._event_loop.is_closed():
@@ -177,9 +186,9 @@ class SessionManager:
                     loop.run_until_complete(self._cleanup_all_async())
                     loop.close()
                 except Exception as e:
-                    print(f"Error during fallback cleanup: {e}")
+                    logger.warning(f"Error during fallback cleanup: {e}")
         except Exception as e:
-            print(f"Error during cleanup: {e}")
+            logger.warning(f"Error during cleanup: {e}")
         finally:
             self._sessions.clear()
     
@@ -219,9 +228,9 @@ class SessionManager:
             except TimeoutError:
                 raise
             except Exception as e:
-                print(f"Error calling tool on attempt {attempt + 1}: {e}")
+                logger.warning(f"Error calling tool on attempt {attempt + 1}: {e}")
                 if attempt < max_retries - 1:
-                    print(f"Recreating session for {server_name}...")
+                    logger.info(f"Recreating session for {server_name}...")
                     await self.cleanup_session(server_name)
                 else:
                     raise e

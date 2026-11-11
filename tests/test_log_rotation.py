@@ -5,15 +5,16 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # Add the project root to Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.elitea_mcp.main import setup_file_logger
+from src.elitea_mcp.utils.logging_setup import create_log_file_handler
 
-# Set up a test log file in the current directory
-log_file = Path('test_rotation.log')
+# Set up a test log file in a temporary directory
+log_file = Path(tempfile.mkdtemp()) / 'test_rotation.log'
 if log_file.exists():
     log_file.unlink()
 
@@ -28,7 +29,8 @@ logger = logging.getLogger(__name__)
 
 # Add rotating file handler
 print(f"Setting up file logger to: {log_file.absolute()}")
-file_handler = setup_file_logger(str(log_file.absolute()), max_bytes=1024, backup_count=3)
+file_handler = create_log_file_handler(str(log_file.absolute()), max_bytes=1024, backup_count=3)
+logging.getLogger().addHandler(file_handler)
 
 # Log some messages
 print("Logging messages...")

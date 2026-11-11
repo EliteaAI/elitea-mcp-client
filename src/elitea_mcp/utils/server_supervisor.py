@@ -91,7 +91,10 @@ class ServerSupervisor:
                                          self.config["timeout"]))
         for load in loads:
             self.registry.record_load(load)
-            if not load.ok:
+            if load.ok:
+                logger.info(f'Server "{load.name}" ({load.transport}): loaded {len(load.tools)} tools',
+                            extra={"console": False})
+            else:
                 logger.warning(load.failure.describe(load.name, load.transport)
                                + "".join(f"\n    {line}" for line in self.mask_output(load.name, load.stderr_tail)))
         return loads

@@ -12,6 +12,7 @@ import subprocess
 import platform
 import multiprocessing
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +33,14 @@ import pystray
 from PIL import Image, ImageDraw
 from .config_errors import ConfigError
 from .config import (SCHEMA_REFERENCE, get_bootstrap_config, set_bootstrap_config, interactive_bootstrap,
-                     get_config_file, load_config)
+                     get_config_file, load_config, save_config)
 from .config_model import NOTIFICATION_LIMIT, check_config, write_config_schema
 from .utils.server_controller import get_server_controller
 from .utils.diagnostics import REPORT_FILE_NAME, TRAY_DIAGNOSTICS_HINT, DoctorContext, format_report, run_checks, summarize
 from .utils.server_registry import DECLINED, FAILED
-from .main import main, setup_file_logger, get_default_paths
+from .main import main, find_default_log_file, get_default_paths, read_config_leniently
+from .utils.logging_setup import (DAEMON, DEBUG, INFO, OWNER_ONLY_FILE_MODE, TRAY, apply_debug_logging, is_debug_logging,
+                                  register_log_secrets, restrict_to_owner, setup_logging)
 from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS, UpdateChecker, get_installed_version
 from .utils.self_update import consume_update_result, resolve_upgrade_plan, start_update_helper
 
@@ -54,14 +57,16 @@ CLIPBOARD_COMMANDS = {
 
 
 class MCPTrayApp:
-    def __init__(self):
+    def __init__(self, log_file=None):
         self.icon = None
+        self._log_file = Path(log_file) if log_file else None
         self.server_controller = get_server_controller()
         self.is_server_running = False
         self.config_error = None
         self.config_report = None
         self.settings = None
         self.diagnostics_running = False
+        self.has_duplicate_keys = False
         self._read_config()
         config = self.settings
         self.update_checker = (
@@ -277,6 +282,10 @@ class MCPTrayApp:
         menu_items.extend([
             pystray.MenuItem("Help", pystray.Menu(
                 pystray.MenuItem(diagnostics_label, self.run_diagnostics, enabled=not self.diagnostics_running),
+                pystray.MenuItem("Open Log File", self.open_log_file),
+                pystray.MenuItem("Open Logs Folder", self.open_logs_folder),
+                pystray.MenuItem("Debug Logging", self.toggle_debug_logging, checked=lambda item: is_debug_logging(),
+                                 enabled=config is not None and not self.has_duplicate_keys),
             )),
             pystray.MenuItem("About", self.show_about),
             pystray.MenuItem("Quit", self.quit_app),
@@ -366,6 +375,9 @@ class MCPTrayApp:
             return None
         self.config_report = check_config(raw)
         self.settings = get_bootstrap_config(raw)
+        self.has_duplicate_keys = has_duplicate_keys(raw)
+        if self.config_report.config is not None:
+            register_log_secrets(self.config_report.config)
         self.config_error = self.config_report if self.config_report.config is None else None
         return None if self.config_error else self.settings
 
@@ -515,6 +527,44 @@ class MCPTrayApp:
         
         self._open_file(config_file)
         logger.info(f"Opening config file: {config_file}")
+
+    @property
+    def log_file(self):
+        return self._log_file or get_default_paths()["tray_log"]
+
+    def open_log_file(self, icon=None, item=None):
+        """Open this tray's log, creating it first so the click always opens something."""
+        try:
+            log_file = self.log_file
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.touch(exist_ok=True)
+        except OSError as error:
+            self.show_error("Open Log File", f"Could not open the log: {error}")
+            return
+        restrict_to_owner(log_file, OWNER_ONLY_FILE_MODE)
+        self._open_file(log_file)
+
+    def open_logs_folder(self, icon=None, item=None):
+        """Open the folder with the logs, the server error reports and the diagnostics report."""
+        try:
+            folder = self.log_file.parent
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            self.show_error("Open Logs Folder", f"Could not open the logs folder: {error}")
+            return
+        self._open_file(folder)
+
+    def toggle_debug_logging(self, icon=None, item=None):
+        """Switch debug logging for this tray at once and remember it as "log_level" for serve and run started later."""
+        enabled = not is_debug_logging()
+        try:
+            save_log_level(DEBUG if enabled else INFO)
+        except (ConfigError, OSError) as error:
+            self.show_error("Debug Logging", f"Could not save the setting: {error}")
+            return
+        apply_debug_logging(enabled)
+        logger.info(f"Debug logging {'enabled' if enabled else 'disabled'}")
+        self.update_menu()
 
     def open_config_folder(self, icon=None, item=None):
         """Open the configuration folder in the file manager."""
@@ -778,23 +828,38 @@ class MCPTrayApp:
             pass
 
 
-def run_tray():
+def run_tray(log_file=None, daemon=False):
     """Entry point for the tray application."""
     # Set fork safety for macOS BEFORE any other imports or operations
     if platform.system() == "Darwin":
         os.environ['OBJC_DISABLE_INITIALIZE_FORK_SAFETY'] = 'YES'
     
-    # Set up file logging
-    try:
-        default_paths = get_default_paths()
-        log_file = default_paths['tray_log']
-        setup_file_logger(str(log_file))
+    log_file = log_file or find_default_log_file('tray_log')
+    setup_logging(DAEMON if daemon else TRAY, read_config_leniently(), log_file)
+    if log_file:
         logger.info(f"Logging to file: {log_file}")
-    except Exception as e:
-        logger.warning(f"Could not set up file logging: {e}")
     
-    app = MCPTrayApp()
+    app = MCPTrayApp(log_file)
     app.run()
+
+
+def has_duplicate_keys(value):
+    """Whether any object in the config repeats a key, which a rewrite of the file would silently resolve."""
+    if isinstance(value, dict):
+        return bool(getattr(value, "duplicate_keys", ())) or any(has_duplicate_keys(child) for child in value.values())
+    if isinstance(value, list):
+        return any(has_duplicate_keys(child) for child in value)
+    return False
+
+
+def save_log_level(level):
+    """Write only "log_level" into config.json, keeping every other key, and only when it changes."""
+    config_file = get_config_file()
+    raw = load_config() if config_file.exists() else {"$schema": SCHEMA_REFERENCE}
+    if str(raw.get("log_level", INFO)).strip().lower() == level and config_file.exists():
+        return
+    raw["log_level"] = level
+    save_config(raw)
 
 
 def main():

@@ -117,6 +117,17 @@ def parse_timeout_seconds(value, info: ValidationInfo):
     return seconds
 
 
+def parse_log_level(value, info: ValidationInfo):
+    """Read "info" or "debug" in any case; anything else is a warning and info is used, so a typo never stops the client."""
+    level = value.strip().lower() if isinstance(value, str) else value
+    if level is None:
+        return "info"
+    if level in ("info", "debug"):
+        return level
+    add_field_problem(info, Severity.WARNING, info.field_name, f'"{value}" is not "info" or "debug", so "info" is used.')
+    return "info"
+
+
 def parse_project_id(value):
     if value is None or value == "":
         return None
@@ -146,6 +157,7 @@ def treat_null_headers_as_empty(value):
 
 Truthy = Annotated[bool, BeforeValidator(read_flag_and_warn_on_false_text)]
 Seconds = Annotated[int, BeforeValidator(parse_timeout_seconds)]
+LogLevel = Annotated[Literal["info", "debug"], BeforeValidator(parse_log_level)]
 
 
 STARTUP_TIMEOUT_DESCRIPTION = "Seconds a server may take to start and answer, before it is reported as timed out"
@@ -187,6 +199,8 @@ class ClientConfig(BaseModel):
     update_check: Truthy = Field(True, description="Check PyPI for new versions of the client")
     update_check_interval_hours: Any = Field(DEFAULT_CHECK_INTERVAL_HOURS,
                                              description="Hours between update checks; 0 or less checks once")
+    log_level: LogLevel = Field("info", description='"debug" adds detail to the logs of the tray, serve and run; '
+                                                    "tool arguments, results and conversations are never logged")
     servers: dict[str, Union[StdioServer, RemoteServer]] = Field(
         default_factory=dict, description="Local MCP servers by name")
 

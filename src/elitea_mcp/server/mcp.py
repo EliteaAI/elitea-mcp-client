@@ -143,43 +143,8 @@ def create_server(agent: Union[Any, List[Any]], name=None):
         with suppress_stdout():
             response = current_agent.predict(**arguments)
         
-        # Debug logging for troubleshooting response extraction
-        # To enable: set environment variable ELITEA_MCP_DEBUG=1
-        logger.debug("=== COMPLETE AGENT RESPONSE ===")
-        logger.debug(f"Response type: {type(response)}")
-        if isinstance(response, dict):
-            logger.debug(f"Response keys: {list(response.keys())}")
-            
-            # Log chat_history in detail
-            if 'chat_history' in response:
-                chat_history = response['chat_history']
-                logger.debug(f"Chat history type: {type(chat_history)}")
-                logger.debug(f"Chat history length: {len(chat_history) if isinstance(chat_history, list) else 'N/A'}")
-                if isinstance(chat_history, list):
-                    for i, msg in enumerate(chat_history):
-                        logger.debug(f"Message {i}: {type(msg)} - {msg}")
-            
-            # Log thinking_steps if present
-            if 'thinking_steps' in response:
-                thinking_steps = response['thinking_steps']
-                logger.debug(f"Thinking steps type: {type(thinking_steps)}")
-                logger.debug(f"Thinking steps length: {len(thinking_steps) if isinstance(thinking_steps, list) else 'N/A'}")
-                if isinstance(thinking_steps, list) and thinking_steps:
-                    logger.debug(f"Last thinking step: {thinking_steps[-1]}")
-            
-            # Log error if present
-            if 'error' in response:
-                logger.debug(f"Error in response: {response['error']}")
-        else:
-            logger.debug(f"Full response: {response}")
-        logger.debug("=== END AGENT RESPONSE ===")
-        
-        # Extract clean response text
         clean_response = extract_final_response(response)
-        logger.debug(f"=== EXTRACTED RESPONSE ===")
-        logger.debug(f"Clean response: {clean_response}")
-        logger.debug(f"Clean response length: {len(clean_response)}")
-        logger.debug("=== END EXTRACTED RESPONSE ===")
+        log_response_shape(response, clean_response)
         
         return [types.TextContent(type="text", text=clean_response)]
 
@@ -206,6 +171,22 @@ def create_server(agent: Union[Any, List[Any]], name=None):
         return tools
         
     return app
+
+
+def log_response_shape(response, clean_response):
+    """Describe an agent response by its shape only: its text is the user's conversation, which a debug log must not carry."""
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    if isinstance(response, dict):
+        chat_history = response.get("chat_history")
+        thinking_steps = response.get("thinking_steps")
+        logger.debug(f"Agent response keys: {sorted(map(str, response))}; "
+                     f"chat history messages: {len(chat_history) if isinstance(chat_history, list) else 'N/A'}; "
+                     f"thinking steps: {len(thinking_steps) if isinstance(thinking_steps, list) else 'N/A'}; "
+                     f"error present: {bool(response.get('error'))}")
+    else:
+        logger.debug(f"Agent response type: {type(response).__name__}")
+    logger.debug(f"Extracted response length: {len(clean_response)}")
 
 
 def run(agent: Any, server=None, transport="stdio", host='0.0.0.0', port=8000):

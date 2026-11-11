@@ -16,7 +16,7 @@ from .client_identity import holds_client_lock
 from .package_updates import fetch_update_state, get_installed_version
 from .preflight import check_platform
 from .self_update import detect_install_method, resolve_upgrade_plan
-from .server_loader import collect_secret_values, load_servers, mask_secrets
+from .server_loader import collect_secret_values, load_servers, mask_secrets, redact_urls
 from .server_registry import DECLINED, FAILED, HEALTHY, ServerEntry
 from .server_supervisor import collect_skipped_servers, format_error_report
 from .session_status import read_running_session
@@ -56,6 +56,7 @@ class DoctorContext:
     list_local_session: Callable[[], Optional[list]] = lambda: None
     raw: Optional[dict] = None
     config_error: Optional[ConfigError] = None
+    config_read_error: Optional[OSError] = None
     report: object = None
 
     @property
@@ -77,12 +78,15 @@ def fail(title, detail="", hint=""):
 
 def read_config(context):
     """Parse the config once; a missing or broken file leaves report None, which the later checks report as their own failure."""
-    if not context.config_file.exists():
-        return
     try:
+        if not context.config_file.exists():
+            return
         context.raw = load_config(context.config_file)
     except ConfigError as error:
         context.config_error = error
+        return
+    except OSError as error:
+        context.config_read_error = error
         return
     context.report = check_config(context.raw)
 
@@ -123,6 +127,9 @@ def describe_os():
 
 
 def check_config_file(context):
+    if context.config_read_error is not None:
+        reason = context.config_read_error.strerror or context.config_read_error
+        return [fail("Config file", f"cannot read {context.config_file}: {reason}", "Check that the path is a readable file.")]
     if not context.config_file.exists():
         return [fail("Config file", f"not found: {context.config_file}", "Run elitea-mcp bootstrap to create it.")]
     results = [ok("Config file found", str(context.config_file))]
@@ -148,7 +155,8 @@ def check_platform_access(context):
         if check.error is not None:
             results.append(fail(check.title, str(check.error)))
         elif index == 0 and path_notes:
-            results.append(warn(check.title, path_notes[0]))
+            results.append(warn(check.title, f"has a page or endpoint path; connecting to the base address {check.detail}",
+                                'Set "deployment_url" to the base address.'))
         else:
             results.append(ok(check.title, check.detail))
     if not is_ssl_verification_enabled(context.config):
@@ -290,12 +298,13 @@ def collect_group(title, future):
 
 
 def format_results(results):
+    """The report people paste into tickets keeps only the scheme and host of URLs, because hosted MCP servers carry secrets in the path."""
     lines = []
     for result in results:
         lines.append(f"  {result.status.value} {result.title}" + (f": {result.detail}" if result.detail else ""))
         if result.hint and result.status is not Status.OK:
             lines.append(f"      {result.hint}")
-    return "\n".join(lines)
+    return "\n".join(redact_urls(line) for line in lines)
 
 
 def count_problems(results):

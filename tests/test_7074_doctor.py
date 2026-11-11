@@ -1,5 +1,6 @@
 """`elitea-mcp doctor` and tray Help → Run Diagnostics (#7074)."""
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -17,7 +18,7 @@ from src.elitea_mcp.utils.diagnostics import (CheckResult, DoctorContext, Status
 from src.elitea_mcp.utils.package_updates import UpdateState
 from src.elitea_mcp.utils.server_loader import (AUTH, COMMAND_NOT_FOUND, TIMEOUT, ServerFailure, ServerLoad,
                                                 identify_failure)
-from src.elitea_mcp.utils.server_registry import ServerRegistry
+from src.elitea_mcp.utils.server_registry import ServerEntry, ServerRegistry
 from src.elitea_mcp.utils.server_supervisor import ServerSupervisor
 from tests import fixtures_7076 as servers
 
@@ -238,7 +239,8 @@ def test_a_url_with_a_page_path_is_a_warning_naming_the_base_address(tmp_path, n
     results = run_doctor(tmp_path, platform_config(deployment_url=f"{ORIGIN}/app/13/mcp"))
 
     assert find(results, "Deployment URL")[0].status is Status.WARNING
-    assert ORIGIN in find(results, "Deployment URL")[0].detail
+    assert (f"  ⚠ Deployment URL: has a page or endpoint path; connecting to the base address {ORIGIN}\n"
+            '      Set "deployment_url" to the base address.\n') in format_report(results)
 
 
 def test_the_pre_flight_still_stops_at_the_first_failure_without_further_requests():
@@ -659,3 +661,61 @@ def test_doctor_writes_utf8_when_its_output_is_redirected_on_a_legacy_code_page(
     redirected.flush()
     assert exited.value.code == 1
     assert redirected.buffer.getvalue().decode("utf-8").endswith("✗ Token: bad\n\n1 problem, 1 warning.\n")
+
+
+def test_a_secret_in_a_server_url_path_never_reaches_the_report(tmp_path, no_pypi):
+    path_secret = "path-secret-7074"
+    config = platform_config(servers={"hosted": {
+        "type": "http", "url": f"http://127.0.0.1:{servers.find_closed_port()}/api/mcp/s/{path_secret}/mcp", "headers": {}}})
+
+    results = run_doctor(tmp_path, config)
+
+    assert path_secret in find(results, 'Local server "hosted"')[0].detail
+    report = format_report(results)
+    assert path_secret not in report
+    assert 'Local server "hosted" (http): cannot reach http://127.0.0.1:' in report
+
+
+def test_a_running_sessions_url_reason_is_cut_to_scheme_and_host_in_the_report():
+    results = diagnostics.describe_session([ServerEntry(
+        "hosted", "http", status="failed",
+        failure=ServerFailure(TIMEOUT, "cannot reach https://mcp.example.com/s/path-secret-7074/mcp: timed out", ""))])
+
+    assert diagnostics.format_results(results) == '  ✗ Running session: "hosted" (http): failed: cannot reach https://mcp.example.com: timed out'
+
+
+RUNS_AS_ROOT_OR_ON_WINDOWS = os.name == "nt" or os.geteuid() == 0
+PERMISSION_BITS_IGNORED = pytest.mark.skipif(RUNS_AS_ROOT_OR_ON_WINDOWS,
+                                             reason="Windows and root ignore POSIX permission bits")
+
+
+@pytest.mark.parametrize("make_unreadable", [
+    "directory",
+    pytest.param("no_permission", marks=PERMISSION_BITS_IGNORED),
+    pytest.param("unsearchable_folder", marks=PERMISSION_BITS_IGNORED),
+])
+def test_a_config_that_cannot_be_read_fails_its_line_and_every_group_still_runs(tmp_path, no_pypi, make_unreadable):
+    locked = None
+    if make_unreadable == "directory":
+        config_path = tmp_path / "config-dir"
+        config_path.mkdir()
+    elif make_unreadable == "no_permission":
+        config_path = locked = write_config(tmp_path, platform_config())
+    else:
+        folder = tmp_path / "config-folder"
+        folder.mkdir()
+        config_path = write_config(folder, platform_config())
+        locked = folder
+    if locked is not None:
+        locked.chmod(0o600 if locked.is_dir() else 0)
+
+    try:
+        results = run_checks(DoctorContext(config_path, tmp_path))
+    finally:
+        if locked is not None:
+            locked.chmod(0o700)
+
+    config_line = find(results, "Config file")[0]
+    assert config_line.status is Status.FAILED and config_line.detail.startswith(f"cannot read {config_path}: ")
+    assert find(results, "Platform") == [fail("Platform", "no usable config to check")]
+    assert find(results, "Running client")

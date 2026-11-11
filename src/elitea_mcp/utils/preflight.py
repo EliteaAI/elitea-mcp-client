@@ -1,4 +1,6 @@
-from typing import Callable
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Optional
 from urllib.parse import urlsplit
 
 import requests
@@ -12,19 +14,102 @@ class PreflightError(Exception):
     """Connection settings the platform cannot work with, described so the user knows what to fix."""
 
 
+@dataclass(frozen=True)
+class PlatformCheck:
+    title: str
+    detail: str = ""
+    error: Optional[PreflightError] = None
+
+
+@dataclass
+class PlatformCheckRun:
+    """The result of every platform step, and the base URL, project id and headers they resolved."""
+    checks: list = field(default_factory=list)
+    origin: Optional[str] = None
+    project_id: Optional[int] = None
+    reachable: bool = False
+    headers: Optional[dict] = None
+
+
 def validate_platform_config(config: dict, notify: Callable[[str], None] = print) -> dict:
     """Return the config with a base deployment URL and an integer project id, once the platform has accepted the token and project."""
-    raw_url = config.get("deployment_url")
-    origin = normalize_deployment_url(raw_url)
-    if origin != raw_url.strip().rstrip("/"):
-        notify(f'Deployment URL "{raw_url}" includes a page or endpoint path; connecting to the base address {origin} instead.')
-    project_id = validate_project_id(config.get("project_id"))
+    run = check_platform(config, notify, fail_fast=True)
+    failed = next((check for check in run.checks if check.error), None)
+    if failed:
+        raise failed.error
+    return {**config, "deployment_url": run.origin, "project_id": run.project_id}
+
+
+def check_platform(config: dict, notify: Callable[[str], None] = print, fail_fast=False) -> PlatformCheckRun:
+    """Run the platform steps in order, one result each; fail_fast stops at the first failure, so start-up sends no request it does not need."""
+    run = PlatformCheckRun()
     verify = is_ssl_verification_enabled(config)
+    for title, step in PLATFORM_STEPS:
+        try:
+            run.checks.append(PlatformCheck(title, step(run, config, verify, notify)))
+        except PreflightError as error:
+            run.checks.append(PlatformCheck(title, error=error))
+            if fail_fast:
+                break
+    return run
+
+
+def check_deployment_url(run, config, verify, notify):
+    raw_url = config.get("deployment_url")
+    run.origin = normalize_deployment_url(raw_url)
+    if run.origin != raw_url.strip().rstrip("/"):
+        notify(f'Deployment URL "{raw_url}" includes a page or endpoint path; connecting to the base address {run.origin} instead.')
+    return run.origin
+
+
+def check_project_id(run, config, verify, notify):
+    run.project_id = validate_project_id(config.get("project_id"))
+    return str(run.project_id)
+
+
+def check_platform_reachable(run, config, verify, notify):
+    origin = require_origin(run)
+    started = time.monotonic()
     validate_platform_reachable(origin, verify)
-    headers = {"Authorization": f"Bearer {validate_auth_token(config.get('auth_token'))}"}
+    run.reachable = True
+    return f"{origin}, {round((time.monotonic() - started) * 1000)} ms"
+
+
+def check_token(run, config, verify, notify):
+    """Send the token only to an address that answered like ELITEA, never to a mistyped or hostile one."""
+    origin = require_origin(run)
+    token = validate_auth_token(config.get("auth_token"))
+    if not run.reachable:
+        raise PreflightError("Cannot check the token until the platform is reachable.")
+    headers = {"Authorization": f"Bearer {token}"}
     validate_token_accepted(origin, headers, verify)
-    validate_project_access(origin, project_id, headers, verify)
-    return {**config, "deployment_url": origin, "project_id": project_id}
+    run.headers = headers
+    return "accepted"
+
+
+def check_project_access(run, config, verify, notify):
+    origin = require_origin(run)
+    if run.project_id is None:
+        raise PreflightError("Cannot check project access: \"project_id\" is not valid.")
+    if run.headers is None:
+        raise PreflightError("Cannot check project access until the token check passes.")
+    validate_project_access(origin, run.project_id, run.headers, verify)
+    return f"project {run.project_id}"
+
+
+def require_origin(run):
+    if run.origin is None:
+        raise PreflightError("Cannot check: the deployment URL is not valid.")
+    return run.origin
+
+
+PLATFORM_STEPS = (
+    ("Deployment URL", check_deployment_url),
+    ("Project ID", check_project_id),
+    ("Platform reachable", check_platform_reachable),
+    ("Token", check_token),
+    ("Project access", check_project_access),
+)
 
 
 def normalize_deployment_url(raw_url) -> str:

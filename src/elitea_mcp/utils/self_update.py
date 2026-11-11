@@ -73,24 +73,51 @@ def is_user_site_install(distribution):
     )
 
 
-def resolve_upgrade_plan(prefix=sys.prefix, base_prefix=sys.base_prefix, executable=sys.executable):
-    """Pick the upgrade command matching how elitea-mcp was installed, or explain why it must be run by hand."""
+SOURCE_CHECKOUT = "source checkout"
+DEVELOPMENT = "development install"
+PIPX = "pipx"
+UV_TOOL = "uv tool"
+VIRTUAL_ENV = "virtual environment"
+USER_SITE = "pip --user"
+SYSTEM_SITE = "pip (system Python)"
+
+
+def detect_install_method(prefix=sys.prefix, base_prefix=sys.base_prefix):
+    """Name how elitea-mcp was installed, with its distribution, or None from an uninstalled checkout."""
     try:
         distribution = importlib.metadata.distribution(package_name)
     except importlib.metadata.PackageNotFoundError:
-        return UpgradePlan(reason="elitea-mcp is running from a source checkout; update it with git.")
+        return SOURCE_CHECKOUT, None
     if is_development_install(distribution):
-        return UpgradePlan(reason="This is a development install; update it with git.")
+        return DEVELOPMENT, distribution
     if Path(prefix, "pipx_metadata.json").exists():
-        return plan_with_tool("pipx", ["upgrade", package_name])
+        return PIPX, distribution
     if Path(prefix, "uv-receipt.toml").exists():
+        return UV_TOOL, distribution
+    if prefix != base_prefix:
+        return VIRTUAL_ENV, distribution
+    if is_user_site_install(distribution):
+        return USER_SITE, distribution
+    return SYSTEM_SITE, distribution
+
+
+def resolve_upgrade_plan(prefix=sys.prefix, base_prefix=sys.base_prefix, executable=sys.executable):
+    """Pick the upgrade command matching how elitea-mcp was installed, or explain why it must be run by hand."""
+    method, distribution = detect_install_method(prefix, base_prefix)
+    if method == SOURCE_CHECKOUT:
+        return UpgradePlan(reason="elitea-mcp is running from a source checkout; update it with git.")
+    if method == DEVELOPMENT:
+        return UpgradePlan(reason="This is a development install; update it with git.")
+    if method == PIPX:
+        return plan_with_tool("pipx", ["upgrade", package_name])
+    if method == UV_TOOL:
         return plan_with_tool("uv", ["tool", "install", f"{package_name}@latest"])
     pip_command = [executable, "-m", "pip", "install", "--upgrade", package_name]
-    if prefix != base_prefix:
+    if method == VIRTUAL_ENV:
         if is_pip_available():
             return plan_with_pip(pip_command, distribution)
         return plan_with_tool("uv", ["pip", "install", "--upgrade", "--python", executable, package_name])
-    if is_user_site_install(distribution):
+    if method == USER_SITE:
         return plan_with_pip([*pip_command, "--user"], distribution)
     return plan_with_pip(pip_command, distribution)
 

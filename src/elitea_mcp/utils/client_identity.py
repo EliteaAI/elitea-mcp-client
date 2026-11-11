@@ -78,6 +78,50 @@ def lock_exclusively(handle):
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
 
 
+def take_lock(path):
+    """Lock the file for as long as the returned handle stays open, or return None when someone else holds it."""
+    try:
+        handle = open(path, "a+")
+    except OSError:
+        return None
+    try:
+        lock_exclusively(handle)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
+def release_lock(handle):
+    unlock(handle)
+    handle.close()
+
+
+def is_lock_held_elsewhere(path):
+    """Tell whether another handle holds the lock, without keeping it; a lock dies with its holder, even on a crash."""
+    if not path.exists():
+        return False
+    try:
+        handle = open(path, "a+")
+    except OSError:
+        return False
+    with handle:
+        try:
+            lock_exclusively(handle)
+        except OSError:
+            return True
+        unlock(handle)
+    return False
+
+
+def unlock(handle):
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    else:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def create_time_ordered_uuid():
     """A version 7 UUID: its text sorts by creation time, so the platform can tell a newer process from an older one."""
     value = (time.time_ns() // 1_000_000) << 80 | int.from_bytes(os.urandom(10), "big")

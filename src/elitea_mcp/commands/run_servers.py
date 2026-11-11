@@ -2,6 +2,7 @@ import sys
 
 from ..config import load_config
 from ..config_model import check_config, write_config_schema
+from ..utils.diagnostics import DOCTOR_HINT
 from ..utils.preflight import PreflightError, validate_platform_config
 from ..utils.server_registry import FAILED
 from ..utils.server_supervisor import ServerSupervisor, collect_skipped_servers
@@ -19,7 +20,7 @@ def run_servers():
     try:
         config = validate_platform_config(report.config)
     except PreflightError as error:
-        print(f"Cannot connect to platform: {error}")
+        print(f"Cannot connect to platform: {error}\n{DOCTOR_HINT}")
         sys.exit(1)
     print("\nMcp Servers from configuration:")
     print(", ".join(config["servers"].keys()))
@@ -30,10 +31,11 @@ def run_servers():
         started = supervisor.start()
     except PlatformConnectionError as error:
         print_server_table(supervisor)
-        print(f"Cannot connect to platform: {error}")
+        print(f"Cannot connect to platform: {error}\n{DOCTOR_HINT}")
         sys.exit(1)
     print_server_table(supervisor)
     if not started:
+        print(DOCTOR_HINT)
         sys.exit(1)
 
     try:

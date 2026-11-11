@@ -20,7 +20,10 @@ from .config import (
 from .config_model import check_config, write_config_schema
 from .clients.elitea import Agent, Agents, ApiDetailsRequestError
 from .server.mcp import run
+from .utils.diagnostics import DOCTOR_HINT, REPORT_TITLE, DoctorContext, exit_code, format_results, run_checks, summarize
+from .utils.package_updates import get_installed_version
 from .utils.preflight import PreflightError, validate_platform_config
+
 
 # Configure logging - avoid stdout to prevent MCP stdio interference
 def configure_logging(use_stdout=True, level=logging.WARNING):
@@ -440,8 +443,22 @@ def validate(config_file=None):
     if report.problems:
         print(f"{config_file}:\n{report.format_problems(include_info=True)}", file=sys.stderr)
     if report.errors:
+        print(DOCTOR_HINT, file=sys.stderr)
         sys.exit(1)
     print(f"Config file is valid: {config_file}")
+
+
+def doctor(config_file=None):
+    """Check the whole local setup and print one line per check as each group finishes; exit 1 when any check fails."""
+    logging.getLogger().setLevel(logging.ERROR)
+    if not sys.stdout.isatty():
+        sys.stdout.reconfigure(encoding="utf-8")
+    config_file = Path(config_file).resolve() if config_file else get_config_file()
+    context = DoctorContext(config_file, get_default_paths()["tray_log"].parent)
+    print(REPORT_TITLE, flush=True)
+    results = run_checks(context, lambda group: print(format_results(group), flush=True))
+    print(f"\n{summarize(results)}")
+    sys.exit(exit_code(results))
 
 
 def cli():
@@ -454,6 +471,8 @@ def cli():
 
 def run_cli():
     parser = argparse.ArgumentParser(description='MCP Client')
+    parser.add_argument('--version', action='version',
+                        version=f"elitea-mcp {get_installed_version() or 'unknown (source checkout)'}")
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
     
     # Main command
@@ -488,11 +507,16 @@ def run_cli():
 
     validate_parser = subparsers.add_parser("validate", help="Check the config file and list every problem; exits non-zero when any is an error")
     validate_parser.add_argument('--config', type=str, help='Config file to check (defaults to the client config file)')
+
+    doctor_parser = subparsers.add_parser("doctor", help="Check the whole local setup (client, config, platform, local servers) and print one line per check; exits non-zero when any check fails")
+    doctor_parser.add_argument('--config', type=str, help='Config file to check (defaults to the client config file)')
     
     args = parser.parse_args()
     
     if args.command == "validate":
         validate(args.config)
+    elif args.command == "doctor":
+        doctor(args.config)
     elif args.command == "bootstrap":
         bootstrap(
             deployment_url=args.deployment_url if hasattr(args, 'deployment_url') else None,

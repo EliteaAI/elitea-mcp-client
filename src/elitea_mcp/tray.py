@@ -33,8 +33,9 @@ from PIL import Image, ImageDraw
 from .config_errors import ConfigError
 from .config import (SCHEMA_REFERENCE, get_bootstrap_config, set_bootstrap_config, interactive_bootstrap,
                      get_config_file, load_config)
-from .config_model import check_config, write_config_schema
+from .config_model import NOTIFICATION_LIMIT, check_config, write_config_schema
 from .utils.server_controller import get_server_controller
+from .utils.diagnostics import REPORT_FILE_NAME, TRAY_DIAGNOSTICS_HINT, DoctorContext, format_report, run_checks, summarize
 from .utils.server_registry import DECLINED, FAILED
 from .main import main, setup_file_logger, get_default_paths
 from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS, UpdateChecker, get_installed_version
@@ -60,6 +61,7 @@ class MCPTrayApp:
         self.config_error = None
         self.config_report = None
         self.settings = None
+        self.diagnostics_running = False
         self._read_config()
         config = self.settings
         self.update_checker = (
@@ -271,7 +273,11 @@ class MCPTrayApp:
                     pystray.MenuItem(f"Update to {update_state.latest} and Restart", self.update_and_restart))
             menu_items.append(pystray.Menu.SEPARATOR)
         
+        diagnostics_label = "Running Diagnostics…" if self.diagnostics_running else "Run Diagnostics"
         menu_items.extend([
+            pystray.MenuItem("Help", pystray.Menu(
+                pystray.MenuItem(diagnostics_label, self.run_diagnostics, enabled=not self.diagnostics_running),
+            )),
             pystray.MenuItem("About", self.show_about),
             pystray.MenuItem("Quit", self.quit_app),
         ])
@@ -295,6 +301,39 @@ class MCPTrayApp:
 
     def retry_failed_servers(self, icon=None, item=None):
         self.server_controller.retry_failed_servers()
+
+    def run_diagnostics(self, icon=None, item=None):
+        """Run every check off the menu thread, which may take as long as the slowest server's start."""
+        if self.diagnostics_running:
+            return
+        self.diagnostics_running = True
+        self.update_menu()
+        self.show_notification("Diagnostics", "Running diagnostics…")
+        threading.Thread(target=self.write_diagnostics_report, name="diagnostics", daemon=True).start()
+
+    def write_diagnostics_report(self):
+        """Save the report next to the logs, open it and copy it, since a notification cannot hold it."""
+        error_dir = get_default_paths()["tray_log"].parent
+        try:
+            results = run_checks(DoctorContext(get_config_file(), error_dir, self.list_local_session))
+            report = format_report(results)
+            path = error_dir / REPORT_FILE_NAME
+            path.write_text(report, encoding="utf-8")
+            copied = self._copy_to_clipboard(report)
+            self._open_file(path)
+            delivery = "Report opened and copied to the clipboard." if copied else f"Report opened: {path}"
+            self.show_notification("Diagnostics", f"{summarize(results)} {delivery}")
+        except Exception as error:
+            logger.exception("Diagnostics failed")
+            self.show_error("Diagnostics", f"Could not run diagnostics: {error}")
+        finally:
+            self.diagnostics_running = False
+            self.update_menu()
+
+    def list_local_session(self):
+        """This tray's own running servers; a daemon-mode session runs in another process, which publishes its own status."""
+        controller = self.server_controller
+        return controller.list_servers() if controller.is_running and not controller.daemon_mode else None
 
     def open_server_error(self, name, icon=None, item=None):
         """Write the server's reason, hint and last output to <server>-error.txt and open it."""
@@ -400,7 +439,7 @@ class MCPTrayApp:
             try:
                 subprocess.run(command, input=text, text=True, check=True, timeout=5)
                 return True
-            except (OSError, subprocess.SubprocessError):
+            except (OSError, subprocess.SubprocessError, UnicodeError):
                 continue
         return False
 
@@ -415,7 +454,7 @@ class MCPTrayApp:
         """Handle server errors."""
         self.is_server_running = False
         self.update_menu()
-        self.show_error("Server Error", error)
+        self.show_error("Server Error", f"{error} {TRAY_DIAGNOSTICS_HINT}")
 
     def start_server(self, daemon_mode: bool = False):
         """Start the MCP server using the server controller.
@@ -440,7 +479,7 @@ class MCPTrayApp:
         success = self.server_controller.start_servers(daemon_mode=daemon_mode)
         if not success:
             mode_str = "daemon" if daemon_mode else "embedded"
-            self.show_error("Server Start Failed", f"Failed to start MCP servers in {mode_str} mode.")
+            self.show_error("Server Start Failed", f"Failed to start MCP servers in {mode_str} mode. {TRAY_DIAGNOSTICS_HINT}")
 
     def stop_server(self):
         """Stop the MCP server using the server controller."""
@@ -608,10 +647,11 @@ class MCPTrayApp:
             self.show_notification("ELITEA MCP Client", "MCP client for ELITEA platform")
 
     def show_error(self, title, message):
-        """Show error message in console and as notification."""
-        logger.error(f"{title}: {message}")
+        """Log the whole error; the notification is cut to fit, because Windows refuses balloon text over 256 characters."""
+        text = f"{title}: {message}"
+        logger.error(text)
         if self.icon:
-            self.icon.notify(f"{title}: {message}", "Error")
+            self.icon.notify(text if len(text) <= NOTIFICATION_LIMIT else text[:NOTIFICATION_LIMIT - 3] + "...", "Error")
 
     def show_notification(self, title, message):
         """Show notification using the system tray."""

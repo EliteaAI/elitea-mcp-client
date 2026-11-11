@@ -46,6 +46,8 @@ INSTALL_HINTS = {
     "uv": "Install uv",
     "docker": "Install Docker",
 }
+PACKAGE_LAUNCHERS = frozenset({"npx", "uvx", "bunx"})
+DLX_LAUNCHERS = frozenset({"pnpm", "yarn"})
 
 
 @dataclass(frozen=True)
@@ -200,8 +202,7 @@ def identify_failure(error, server_conf, startup_timeout):
     if isinstance(leaf, FileNotFoundError) and transport == "stdio":
         return describe_missing_command(server_conf.get("command") or str(leaf.filename or ""))
     if isinstance(leaf, TimeoutError):
-        return ServerFailure(TIMEOUT, f"did not respond within {startup_timeout} s",
-                             'Check the command/URL or increase "startup_timeout".')
+        return ServerFailure(TIMEOUT, f"did not respond within {startup_timeout} s", describe_timeout_hint(server_conf))
     if isinstance(leaf, httpx.HTTPStatusError):
         label = f"{leaf.response.status_code} {leaf.response.reason_phrase}".strip()
         if leaf.response.status_code in AUTH_STATUS_CODES:
@@ -215,6 +216,27 @@ def identify_failure(error, server_conf, startup_timeout):
         return ServerFailure(UNREACHABLE, f"cannot reach {server_conf.get('url', '')}: {describe_connect_error(leaf)}",
                              'Check "url" and that the server is running.')
     return ServerFailure(EXITED, "exited during start", 'Check its "command", "args" and "env".')
+
+
+def describe_timeout_hint(server_conf):
+    """A package launcher downloads the package on its first run, inside the start timeout, so say that before blaming the server."""
+    launcher = find_package_launcher(server_conf)
+    if launcher:
+        return (f"The first run of {launcher} may still be downloading the package: run the command once in a terminal, "
+                'or increase "startup_timeout".')
+    return 'Check the command/URL or increase "startup_timeout".'
+
+
+def find_package_launcher(server_conf):
+    if read_transport(server_conf) != "stdio":
+        return None
+    command = os.path.splitext(os.path.basename(server_conf.get("command") or ""))[0].lower()
+    args = server_conf.get("args") or []
+    if command in PACKAGE_LAUNCHERS:
+        return command
+    if command in DLX_LAUNCHERS and args and args[0] == "dlx":
+        return f"{command} dlx"
+    return None
 
 
 def read_retry_after(response):

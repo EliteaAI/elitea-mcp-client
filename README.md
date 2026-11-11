@@ -198,6 +198,9 @@ Right-click the tray icon to access:
 - **Stop MCP Server** - Stop running servers (shows current mode)
 - **Restart MCP Server** - Reload configuration by stopping and starting servers
 
+#### Help
+- **Run Diagnostics** - Run every `elitea-mcp doctor` check, open the report and copy it to the clipboard
+
 #### Servers
 Shown after the first start, with one row per configured server:
 - `✓ jira — 14 tools, registered` - the server runs and ELITEA has its tools
@@ -261,6 +264,8 @@ elitea-mcp run                       # Run MCP client with specific project/app
 elitea-mcp serve                     # Start MCP servers in background
 elitea-mcp tray                      # Launch system tray application
 elitea-mcp validate                  # List every problem in the config file; exit 1 when any is an error, 0 otherwise; --config <path> checks another file
+elitea-mcp doctor                    # Check the whole local setup, one line per check; exit 1 when any check fails; --config <path> checks another file
+elitea-mcp --version                 # Print the installed version
 ```
 
 ### Running MCP Client
@@ -534,7 +539,27 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ## 🔧 Troubleshooting
 
-### Common Issues
+### Run the Doctor First
+
+`elitea-mcp doctor` (or **Help → Run Diagnostics** in the tray) checks the client version against PyPI, the config file, the platform (URL, SSL, token, project access), starts every local server once to list its tools, and reports the SSE port and any client already running with the same config:
+
+```text
+ELITEA MCP doctor
+  ✓ elitea-mcp 0.1.36: latest
+  ✓ Config schema valid
+  ✓ Token: accepted
+  ✗ Local server "github" (stdio): command "npx" not found
+      Install Node.js or use the full path in "command".
+  ⚠ Running client: another client is connected with this config; servers were started a second time for this check, so a server that holds a port may fail here only
+  ⚠ Running session: "jira" (stdio): declined (name already registered)
+
+1 problem, 2 warnings.
+```
+
+- ✓ passed, ⚠ worth a look, ✗ broken. The exit code is 1 only when a line is ✗.
+- The report never contains the token, header or `env` values, or a server's own output. When a failed server wrote output, its line ends with `Details: <file>`, the same masked `<server>-error.txt` the tray's **Servers** menu opens.
+- The tray saves the report as `elitea-mcp-diagnostics.txt` next to the tray log, opens it and copies it to the clipboard, ready to paste into a support request.
+- A running client (tray or `serve`) writes its server status to `status.json` in the config folder (owner-only), so the doctor can show the running session; a client that stops updating it for 60 s is reported as possibly frozen.
 
 #### macOS: "Fork Safety" Errors
 If you encounter fork safety errors on macOS, they have been automatically resolved in version 0.1.10+. The client now uses fork-safe daemon mode for GUI applications.
@@ -569,6 +594,7 @@ rm -rf ~/Library/Application\ Support/elitea-mcp-client  # macOS
 1. Check the relevant documentation in `docs/`
 2. Search existing [GitHub Issues](https://github.com/EliteaAI/elitea-mcp-client/issues)
 3. Create a new issue with:
+   - The output of `elitea-mcp doctor` (or the tray's Run Diagnostics report)
    - Your operating system and version
    - Python version (`python --version`)
    - Full error message and traceback

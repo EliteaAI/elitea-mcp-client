@@ -8,6 +8,7 @@ from ..config_model import DEFAULT_STARTUP_TIMEOUT, SKIPPED
 from .name import sanitize
 from .server_loader import collect_secret_values, load_servers, mask_secrets, read_transport
 from .server_registry import FAILED, HEALTHY, ServerRegistry
+from .session_status import SessionStatusPublisher
 from .sio import start_socket_connection
 
 RETRY_DELAYS = (30, 60, 120, 300)
@@ -38,6 +39,19 @@ def calculate_retry_delay(entry):
     return max(delay, entry.failure.retry_after or 0)
 
 
+def format_error_report(entry, output):
+    """The text of <server>-error.txt: status, reason, hint and the server's last output with secrets already hidden."""
+    lines = [f'Server "{entry.name}" ({entry.transport})', f"Status: {entry.describe_status()}"]
+    if entry.failure:
+        lines += [f"Reason: {entry.failure.reason}", f"Hint: {entry.failure.hint}"]
+    if entry.status != FAILED and entry.decline_reason:
+        lines.append("Hint: another running client, or a session that has not timed out yet, holds this name in the "
+                     "project. Stop it or rename the server in config.json.")
+    if output:
+        lines += ["", "Last output:", *(f"    {line}" for line in output)]
+    return "\n".join(lines) + "\n"
+
+
 def ignore_message(message):
     """Stand in for a notification callback the caller did not provide."""
 
@@ -51,8 +65,11 @@ class ServerSupervisor:
         self.notify_error = notify_error or ignore_message
         self.notify_server = notify_server or ignore_message
         self.summary_suffix = summary_suffix
-        self.registry = ServerRegistry(on_change)
+        self.on_change = on_change or (lambda: None)
         self.link = None
+        self.session_status = SessionStatusPublisher(lambda: self.registry.list_entries(),
+                                                     lambda: self.link is not None and self.link.connected)
+        self.registry = ServerRegistry(self.handle_registry_change)
         self._timers = {}
         self._retry_lock = threading.Lock()
         self._stopped = False
@@ -60,6 +77,10 @@ class ServerSupervisor:
             self.registry.add_pending(name, read_transport(server_conf))
         for name, transport, problem in skipped:
             self.registry.add_invalid(name, transport, problem)
+
+    def handle_registry_change(self):
+        self.on_change()
+        self.session_status.publish()
 
     def summarize(self):
         return self.registry.summarize(self.summary_suffix)
@@ -80,20 +101,8 @@ class ServerSupervisor:
         return mask_secrets(lines, collect_secret_values(self.config, self.config["servers"].get(name) or {}))
 
     def format_error_report(self, name):
-        """The text of <server>-error.txt: status, reason, hint and the server's last output with secrets hidden."""
         entry = self.registry.get(name)
-        if entry is None:
-            return None
-        lines = [f'Server "{entry.name}" ({entry.transport})', f"Status: {entry.describe_status()}"]
-        if entry.failure:
-            lines += [f"Reason: {entry.failure.reason}", f"Hint: {entry.failure.hint}"]
-        if entry.status != FAILED and entry.decline_reason:
-            lines.append("Hint: another running client, or a session that has not timed out yet, holds this name in the "
-                         "project. Stop it or rename the server in config.json.")
-        output = self.mask_output(name, entry.stderr_tail)
-        if output:
-            lines += ["", "Last output:", *(f"    {line}" for line in output)]
-        return "\n".join(lines) + "\n"
+        return None if entry is None else format_error_report(entry, self.mask_output(name, entry.stderr_tail))
 
     def read_console_output(self, name):
         entry = self.registry.get(name)
@@ -112,6 +121,7 @@ class ServerSupervisor:
                 return False
             self.link = start_socket_connection(self.config, self.registry, self.notify_status, self.notify_error,
                                                 self.handle_server_failure)
+            self.session_status.start()
             self.notify_server(self.summarize())
             for entry in self.registry.list_by_status(FAILED):
                 self.schedule_retry(entry.name)
@@ -119,6 +129,7 @@ class ServerSupervisor:
 
     def stop(self):
         self._stopped = True
+        self.session_status.stop()
         for name in list(self._timers):
             self.cancel_retry(name)
         if self.link is not None:

@@ -17,6 +17,7 @@ except ImportError:
 
 CLIENT_ID_FILE_NAME = "client_id"
 CLIENT_ID_LOCK_NAME = "client_id.lock"
+SESSION_STATUS_FILE_NAME = "status.json"
 MACHINE_PART_LENGTH = 12
 RANDOM_NODE_BIT = 1 << 40
 _held_locks = {}
@@ -36,8 +37,11 @@ def load_client_id():
     config_dir = get_config_dir()
     path = config_dir / CLIENT_ID_FILE_NAME
     machine = read_machine_part()
-    if not hold_lock(config_dir / CLIENT_ID_LOCK_NAME):
+    newly_held = not holds_client_lock()
+    if not hold_lock(get_client_lock_path()):
         return f"{machine}-{uuid.uuid4()}"
+    if newly_held:
+        clear_previous_session_status()
     try:
         stored = path.read_text(encoding="utf-8").strip()
     except OSError:
@@ -50,6 +54,15 @@ def load_client_id():
     except OSError as error:
         logger.warning(f"Could not save the client id to {path}: {error}")
     return client_id
+
+
+def clear_previous_session_status():
+    """A new lock holder starts publishing only once connected, so the status a previous holder left must not pass for this one's."""
+    path = get_client_lock_path().parent / SESSION_STATUS_FILE_NAME
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as error:
+        logger.warning(f"Could not remove the previous session status {path}: {error}")
 
 
 def hold_lock(path):
@@ -76,6 +89,41 @@ def lock_exclusively(handle):
     else:
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+
+
+def get_client_lock_path():
+    return get_config_dir() / CLIENT_ID_LOCK_NAME
+
+
+def holds_client_lock():
+    """Tell whether this process is the client connected with this config directory."""
+    return str(get_client_lock_path()) in _held_locks
+
+
+def is_client_lock_held_elsewhere():
+    """Tell whether another process holds the client lock, without keeping it; the lock dies with its holder, even on a crash."""
+    path = get_client_lock_path()
+    if str(path) in _held_locks or not path.exists():
+        return False
+    try:
+        handle = open(path, "a+")
+    except OSError:
+        return False
+    with handle:
+        try:
+            lock_exclusively(handle)
+        except OSError:
+            return True
+        unlock(handle)
+    return False
+
+
+def unlock(handle):
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    else:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def create_time_ordered_uuid():

@@ -12,7 +12,6 @@ from typing import Callable, Optional
 from ..config import is_ssl_verification_enabled, load_config
 from ..config_errors import ConfigError
 from ..config_model import DEFAULT_STARTUP_TIMEOUT, DEFAULT_TIMEOUT, Severity, check_config
-from .client_identity import holds_client_lock
 from .package_updates import fetch_update_state, get_installed_version
 from .preflight import check_platform
 from .self_update import detect_install_method, resolve_upgrade_plan
@@ -231,21 +230,22 @@ def check_port(context):
 
 
 def check_running_client(context):
-    if holds_client_lock():
-        entries = context.list_local_session()
-        if not entries:
-            return [ok("Running client", "only this tray, with its servers stopped")]
-        return [warn("Running client", f"this tray; {SECOND_COPY_NOTE}"), *describe_session(entries)]
+    entries = context.list_local_session()
     session = read_running_session()
+    if entries is not None:
+        results = [warn("Running client", f"this tray; {SECOND_COPY_NOTE}") if entries
+                   else ok("Running client", "this tray, its servers not started yet")]
+        if session is not None:
+            results.append(warn("Running client", "another client is also running servers with this config",
+                                "Stop one of them: the second copy's servers are declined by the platform."))
+        return results + describe_session(entries)
     if session is None:
         return [ok("Running client", "none")]
-    if not session.running:
-        return [ok("Running client", "another client is open with this config, with its servers stopped")]
-    results = [warn("Running client", f"another client is connected with this config; {SECOND_COPY_NOTE}")]
+    results = [warn("Running client", f"another client is running servers with this config; {SECOND_COPY_NOTE}")]
     if session.problem:
         return results + [warn("Running session", session.problem)]
     connection = ok("Running session", "connected to the platform") if session.connected else \
-        warn("Running session", "not connected to the platform (reconnecting)")
+        warn("Running session", "not connected to the platform yet (starting or reconnecting)")
     return results + [connection, *describe_session(session.entries)]
 
 

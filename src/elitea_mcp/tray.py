@@ -331,9 +331,14 @@ class MCPTrayApp:
             self.update_menu()
 
     def list_local_session(self):
-        """This tray's own running servers; a daemon-mode session runs in another process, which publishes its own status."""
+        """This tray's own running servers, empty while the current run is still checking the platform; a daemon-mode session runs in another process, which publishes its own status."""
         controller = self.server_controller
-        return controller.list_servers() if controller.is_running and not controller.daemon_mode else None
+        if not controller.is_running or controller.daemon_mode:
+            return None
+        supervisor = controller.supervisor
+        if supervisor is None or supervisor.cancelled is not controller.stop_event:
+            return []
+        return controller.list_servers()
 
     def open_server_error(self, name, icon=None, item=None):
         """Write the server's reason, hint and last output to <server>-error.txt and open it."""

@@ -204,7 +204,22 @@ def test_every_platform_step_reports_even_after_the_platform_is_unreachable(tmp_
                       if result.title in ("Deployment URL", "Project ID", "Platform reachable", "Token", "Project access")]
     assert platform_steps == [("Deployment URL", Status.OK), ("Project ID", Status.OK), ("Platform reachable", Status.FAILED),
                               ("Token", Status.FAILED), ("Project access", Status.FAILED)]
-    assert "Cannot reach" in find(results, "Token")[0].detail
+    assert find(results, "Token")[0].detail == "Cannot check the token until the platform is reachable."
+
+
+@pytest.mark.parametrize("socket_answer", [answer(404, "text/html"), answer(200, "text/html")])
+def test_the_token_is_never_sent_to_an_address_that_is_not_elitea(tmp_path, no_pypi, socket_answer):
+    requested = []
+
+    def not_elitea(url, **kwargs):
+        requested.append((url, kwargs.get("headers")))
+        return socket_answer
+
+    results = run_doctor(tmp_path, platform_config(), not_elitea)
+
+    assert [url for url, _ in requested] == [f"{ORIGIN}/socket.io/?EIO=4&transport=polling"]
+    assert requested[0][1] is None
+    assert find(results, "Token")[0].status is Status.FAILED
 
 
 def test_a_rejected_token_leaves_project_access_unchecked_instead_of_asking_without_it(tmp_path, no_pypi):
@@ -249,6 +264,51 @@ def test_the_pre_flight_still_stops_at_the_first_failure_without_further_request
         preflight.validate_platform_config(platform_config(), lambda message: None)
 
     assert get.call_count == 1
+
+
+def test_a_missing_token_is_reported_even_when_the_platform_is_unreachable(tmp_path, no_pypi):
+    def unreachable(url, **kwargs):
+        raise requests.exceptions.ConnectionError("refused")
+
+    results = run_doctor(tmp_path, platform_config(auth_token=""), unreachable)
+
+    assert find(results, "Token")[0].detail.startswith('"auth_token" is not set.')
+
+
+def test_stopping_during_a_slow_start_frees_the_session_at_once(tmp_path):
+    from src.elitea_mcp.utils import server_controller
+    loading = threading.Event()
+    finish_loading = threading.Event()
+    supervisor = ServerSupervisor({"servers": {"jira": {}}, "timeout": 30})
+
+    def slow_load(names=None):
+        loading.set()
+        finish_loading.wait(10)
+        return []
+
+    controller = server_controller.ServerController()
+    with patch.object(supervisor, "load", side_effect=slow_load):
+        run = threading.Thread(target=supervisor.start, daemon=True)
+        run.start()
+        assert loading.wait(5)
+        controller.is_running, controller.daemon_mode, controller.supervisor, controller.server_thread = True, False, supervisor, run
+        lock_path = session_status.get_session_lock_path()
+        assert client_identity.is_lock_held_elsewhere(lock_path) is True
+
+        with patch.object(server_controller, "MONITOR_DELAY", 0.1):
+            controller.stop_servers()
+
+        assert client_identity.is_lock_held_elsewhere(lock_path) is False
+        finish_loading.set()
+        run.join(5)
+
+
+def test_the_pre_flight_sends_no_request_once_an_earlier_step_failed():
+    get = MagicMock(side_effect=AssertionError("no request expected"))
+    with patch.object(preflight.requests, "get", get), pytest.raises(preflight.PreflightError, match="must be a number"):
+        preflight.validate_platform_config(platform_config(project_id="abc"), lambda message: None)
+
+    get.assert_not_called()
 
 
 # Local servers
@@ -342,62 +402,39 @@ def test_an_unknown_host_is_not_reported_as_a_busy_port(tmp_path):
     assert diagnostics.check_port(context).title == 'Host "no-such-host.invalid"'
 
 
-HOLDER = ("import sys, time\n"
-          "from src.elitea_mcp.utils import client_identity\n"
-          "from pathlib import Path\n"
-          "client_identity.get_config_dir = lambda: Path(sys.argv[1])\n"
-          "print(client_identity.hold_lock(client_identity.get_client_lock_path()), flush=True)\n"
-          "time.sleep(60)\n")
+SESSION_HOLDER = ("import sys, time\n"
+                  "from pathlib import Path\n"
+                  "from src.elitea_mcp.utils import client_identity, session_status\n"
+                  "client_identity.get_config_dir = lambda: Path(sys.argv[1])\n"
+                  "held = client_identity.take_lock(session_status.get_session_lock_path())\n"
+                  "print(held is not None, flush=True)\n"
+                  "time.sleep(60)\n")
 
 
 @pytest.fixture
-def other_client(tmp_path):
-    holder = subprocess.Popen([sys.executable, "-c", HOLDER, str(tmp_path)], stdout=subprocess.PIPE, text=True)
+def other_session(tmp_path):
+    """Another process running servers with this config, the way a `serve` holds the session lock."""
+    holder = subprocess.Popen([sys.executable, "-c", SESSION_HOLDER, str(tmp_path)], stdout=subprocess.PIPE, text=True)
     assert holder.stdout.readline().strip() == "True"
     yield holder
     holder.kill()
     holder.wait()
 
 
-def test_the_lock_tells_another_running_client_apart_from_none_and_from_this_process(tmp_path, other_client):
-    assert client_identity.is_client_lock_held_elsewhere() is True
-    other_client.kill()
-    other_client.wait()
-    assert client_identity.is_client_lock_held_elsewhere() is False
-    assert client_identity.hold_lock(client_identity.get_client_lock_path()) is True
-    assert client_identity.holds_client_lock() is True
-    assert client_identity.is_client_lock_held_elsewhere() is False
-
-
-CONNECTING_CLIENT = ("import sys, time\n"
-                     "from src.elitea_mcp.utils import client_identity\n"
-                     "from pathlib import Path\n"
-                     "client_identity.get_config_dir = lambda: Path(sys.argv[1])\n"
-                     "client_identity.load_client_id()\n"
-                     "print('connecting', flush=True)\n"
-                     "time.sleep(60)\n")
-
-
-def test_a_new_lock_holder_never_passes_off_the_previous_runs_status_as_its_own(tmp_path):
-    write_status(tmp_path, build_session(), age=20)
-    connecting = subprocess.Popen([sys.executable, "-c", CONNECTING_CLIENT, str(tmp_path)], stdout=subprocess.PIPE, text=True)
-    try:
-        assert connecting.stdout.readline().strip() == "connecting"
-
-        session = session_status.read_running_session()
-
-        assert (session.entries, session.problem.startswith("it has not published its server status")) == (None, True)
-    finally:
-        connecting.kill()
-        connecting.wait()
+def test_the_session_lock_tells_a_running_session_apart_from_none(tmp_path, other_session):
+    lock_path = session_status.get_session_lock_path()
+    assert client_identity.is_lock_held_elsewhere(lock_path) is True
+    other_session.kill()
+    other_session.wait()
+    assert client_identity.is_lock_held_elsewhere(lock_path) is False
 
 
 def test_no_running_client_is_reported_as_none(tmp_path):
     assert diagnostics.check_running_client(DoctorContext(tmp_path, tmp_path)) == [ok("Running client", "none")]
 
 
-def write_status(tmp_path, entries, age=0, running=True, connected=True):
-    status = {"pid": 1, "updated_at": time.time() - age, "running": running, "connected": connected,
+def write_status(tmp_path, entries, age=0, connected=True):
+    status = {"pid": 1, "updated_at": time.time() - age, "connected": connected,
               "servers": [session_status.describe_entry(entry) for entry in entries]}
     (tmp_path / session_status.STATUS_FILE_NAME).write_text(json.dumps(status))
 
@@ -412,12 +449,12 @@ def build_session():
     return registry.list_entries()
 
 
-def test_another_clients_live_session_is_read_from_its_status_file(tmp_path, other_client):
+def test_another_clients_live_session_is_read_from_its_status_file(tmp_path, other_session):
     write_status(tmp_path, build_session())
 
     results = diagnostics.check_running_client(DoctorContext(tmp_path, tmp_path))
 
-    assert results[0].status is Status.WARNING and "another client is connected" in results[0].detail
+    assert results[0].status is Status.WARNING and "another client is running servers" in results[0].detail
     assert [(result.status, result.title, result.detail) for result in results[1:]] == [
         (Status.OK, "Running session", "connected to the platform"),
         (Status.OK, 'Running session: "jira" (stdio)', "2 tools, registered"),
@@ -427,7 +464,17 @@ def test_another_clients_live_session_is_read_from_its_status_file(tmp_path, oth
     assert "rename the server" in results[3].hint
 
 
-def test_a_frozen_client_is_not_trusted(tmp_path, other_client):
+def test_a_serve_beside_an_idle_tray_is_still_seen(tmp_path, other_session):
+    client_identity.hold_lock(tmp_path / client_identity.CLIENT_ID_LOCK_NAME)
+    write_status(tmp_path, build_session())
+
+    results = diagnostics.check_running_client(DoctorContext(tmp_path, tmp_path))
+
+    assert "another client is running servers" in results[0].detail
+    assert len(results) == 5
+
+
+def test_a_frozen_client_is_not_trusted(tmp_path, other_session):
     write_status(tmp_path, build_session(), age=session_status.STALE_AFTER_SECONDS + 5)
 
     results = diagnostics.check_running_client(DoctorContext(tmp_path, tmp_path))
@@ -436,10 +483,10 @@ def test_a_frozen_client_is_not_trusted(tmp_path, other_client):
     assert "may be frozen" in results[1].detail
 
 
-def test_a_running_client_without_a_status_file_is_named_without_rows(tmp_path, other_client):
+def test_a_running_client_without_a_status_file_is_named_without_rows(tmp_path, other_session):
     results = diagnostics.check_running_client(DoctorContext(tmp_path, tmp_path))
 
-    assert "not published its server status" in results[1].detail
+    assert results[1].detail == "it has not published its server status yet"
 
 
 def test_a_status_file_without_its_lock_holder_is_ignored(tmp_path):
@@ -448,17 +495,7 @@ def test_a_status_file_without_its_lock_holder_is_ignored(tmp_path):
     assert diagnostics.check_running_client(DoctorContext(tmp_path, tmp_path)) == [ok("Running client", "none")]
 
 
-def test_a_client_whose_servers_stopped_is_not_a_warning(tmp_path, other_client):
-    write_status(tmp_path, [], age=3600, running=False, connected=False)
-
-    results = diagnostics.check_running_client(DoctorContext(tmp_path, tmp_path))
-
-    assert [result.status for result in results] == [Status.OK]
-
-
 def test_the_tray_shows_its_own_session_from_memory(tmp_path):
-    client_identity.hold_lock(client_identity.get_client_lock_path())
-
     results = diagnostics.check_running_client(DoctorContext(tmp_path, tmp_path, build_session))
 
     assert "this tray" in results[0].detail
@@ -466,26 +503,129 @@ def test_the_tray_shows_its_own_session_from_memory(tmp_path):
         'Running session: "jira" (stdio)', 'Running session: "github" (stdio)', 'Running session: "figma" (sse)']
 
 
-# The running client publishes its status
+# The running session publishes its status
 
-def test_the_status_file_is_written_only_by_the_lock_holder_and_ends_as_stopped(tmp_path):
+def test_only_the_session_lock_holder_publishes_and_stopping_hands_the_session_over(tmp_path):
     entries = build_session()
-    publisher = session_status.SessionStatusPublisher(lambda: entries, lambda: True)
+    first = session_status.SessionStatusPublisher(lambda: entries, lambda: True)
+    second = session_status.SessionStatusPublisher(lambda: entries[:1], lambda: False)
     status_file = tmp_path / session_status.STATUS_FILE_NAME
 
-    publisher.publish()
-    assert not status_file.exists()
-
-    client_identity.hold_lock(client_identity.get_client_lock_path())
-    publisher.publish()
+    first.publish()
+    second.publish()
     written = json.loads(status_file.read_text())
-    assert (written["running"], written["connected"], [item["name"] for item in written["servers"]]) == (
-        True, True, ["jira", "github", "figma"])
+    assert (written["connected"], [item["name"] for item in written["servers"]]) == (True, ["jira", "github", "figma"])
     assert status_file.stat().st_mode & 0o077 == 0
 
-    publisher.stop()
+    first.stop()
+    first.publish()
+    assert not status_file.exists()
+    assert not client_identity.is_lock_held_elsewhere(session_status.get_session_lock_path())
+
+    second.publish()
+    assert [item["name"] for item in json.loads(status_file.read_text())["servers"]] == ["jira"]
+    second.stop()
+
+
+def test_the_status_says_connected_as_soon_as_the_platform_link_is_up(tmp_path):
+    from src.elitea_mcp.utils import server_supervisor
+    supervisor = ServerSupervisor({"servers": {"jira": {}}, "timeout": 30})
+
+    def load(names=None):
+        supervisor.registry.record_load(ServerLoad("jira", "stdio", tools=[{"name": "search"}]))
+        return []
+
+    with patch.object(supervisor, "load", side_effect=load), \
+            patch.object(server_supervisor, "start_socket_connection", return_value=MagicMock(connected=True)):
+        assert supervisor.start() is True
+
+    assert json.loads((tmp_path / session_status.STATUS_FILE_NAME).read_text())["connected"] is True
+    supervisor.stop()
+
+
+def test_the_status_file_stays_next_to_the_lock_it_was_taken_with(tmp_path):
+    publisher = session_status.SessionStatusPublisher(lambda: [], lambda: True)
     publisher.publish()
-    assert json.loads(status_file.read_text())["running"] is False
+    elsewhere = tmp_path / "another-config-dir"
+    elsewhere.mkdir()
+
+    with patch.object(client_identity, "get_config_dir", return_value=elsewhere):
+        publisher.publish()
+        assert not (elsewhere / session_status.STATUS_FILE_NAME).exists()
+        publisher.stop()
+
+    assert not (tmp_path / session_status.STATUS_FILE_NAME).exists()
+
+
+def test_a_run_cancelled_before_it_loads_never_takes_the_session(tmp_path):
+    cancelled = threading.Event()
+    cancelled.set()
+    supervisor = ServerSupervisor({"servers": {"jira": {}}, "timeout": 30}, cancelled=cancelled)
+
+    with patch.object(supervisor, "load") as load:
+        assert supervisor.start() is False
+
+    load.assert_not_called()
+    assert not (tmp_path / session_status.STATUS_FILE_NAME).exists()
+    assert not client_identity.is_lock_held_elsewhere(session_status.get_session_lock_path())
+
+
+def test_stop_from_the_tray_menu_frees_the_session_without_waiting_for_the_platform(tmp_path):
+    from src.elitea_mcp.utils import server_controller
+    supervisor = ServerSupervisor({"servers": {"jira": {}}, "timeout": 30})
+    supervisor.session_status.publish()
+    supervisor.link = MagicMock(disconnect=MagicMock(side_effect=lambda: time.sleep(3)))
+    controller = server_controller.ServerController()
+    controller.is_running, controller.daemon_mode, controller.supervisor = True, False, supervisor
+
+    began = time.monotonic()
+    controller.stop_servers()
+
+    assert time.monotonic() - began < 1
+    supervisor.link.disconnect.assert_not_called()
+    assert not client_identity.is_lock_held_elsewhere(session_status.get_session_lock_path())
+
+
+def test_a_session_this_process_runs_is_never_reported_as_another_client(tmp_path):
+    publisher = session_status.SessionStatusPublisher(build_session, lambda: True)
+    publisher.publish()
+
+    assert session_status.read_running_session() is None
+    assert diagnostics.check_running_client(DoctorContext(tmp_path, tmp_path)) == [ok("Running client", "none")]
+    publisher.stop()
+
+
+def test_a_tray_still_checking_the_platform_does_not_claim_a_second_copy_of_its_servers(tmp_path):
+    results = diagnostics.check_running_client(DoctorContext(tmp_path, tmp_path, lambda: []))
+
+    assert results == [ok("Running client", "this tray, its servers not started yet")]
+
+
+def test_the_tray_names_another_client_that_already_runs_servers_with_its_config(tmp_path, other_session):
+    write_status(tmp_path, build_session())
+
+    results = diagnostics.check_running_client(DoctorContext(tmp_path, tmp_path, build_session))
+
+    assert results[1] == warn("Running client", "another client is also running servers with this config",
+                              "Stop one of them: the second copy's servers are declined by the platform.")
+    assert [result.title for result in results[2:]] == [
+        'Running session: "jira" (stdio)', 'Running session: "github" (stdio)', 'Running session: "figma" (sse)']
+
+
+def test_a_publish_waiting_for_the_write_lock_writes_the_newest_servers(tmp_path):
+    entries = [ServerEntry("jira", "stdio")]
+    publisher = session_status.SessionStatusPublisher(lambda: list(entries), lambda: False)
+    publisher.publish()
+
+    with publisher._write_lock:
+        waiting = threading.Thread(target=publisher.publish)
+        waiting.start()
+        time.sleep(0.2)
+        entries[0] = ServerEntry("jira", "stdio", status="healthy", tools=[{"name": "search"}])
+    waiting.join(5)
+
+    assert json.loads((tmp_path / session_status.STATUS_FILE_NAME).read_text())["servers"][0]["status"] == "healthy"
+    publisher.stop()
 
 
 def test_a_server_round_trips_through_the_status_file():
@@ -494,16 +634,23 @@ def test_a_server_round_trips_through_the_status_file():
         assert (restored.mark, restored.describe_status()) == (entry.mark, entry.describe_status())
 
 
-def test_the_supervisor_publishes_every_change_once_it_holds_the_lock(tmp_path):
-    client_identity.hold_lock(client_identity.get_client_lock_path())
+def test_the_supervisor_publishes_from_the_start_of_loading_and_every_change_until_stop(tmp_path):
     supervisor = ServerSupervisor({"servers": {"jira": {}}, "timeout": 30})
+    status_file = tmp_path / session_status.STATUS_FILE_NAME
+    seen_while_loading = []
 
-    supervisor.registry.record_load(ServerLoad("jira", "stdio", failure=ServerFailure(COMMAND_NOT_FOUND, "missing", "")))
+    def load(names=None):
+        seen_while_loading.append(json.loads(status_file.read_text())["servers"][0]["status"])
+        supervisor.registry.record_load(ServerLoad("jira", "stdio", failure=ServerFailure(COMMAND_NOT_FOUND, "missing", "")))
+        return []
 
-    written = json.loads((tmp_path / session_status.STATUS_FILE_NAME).read_text())
-    assert written["servers"][0]["failure"]["reason"] == "missing"
+    with patch.object(supervisor, "load", side_effect=load):
+        assert supervisor.start() is False
+
+    assert seen_while_loading == ["pending"]
+    assert json.loads(status_file.read_text())["servers"][0]["failure"]["reason"] == "missing"
     supervisor.stop()
-    assert json.loads((tmp_path / session_status.STATUS_FILE_NAME).read_text())["running"] is False
+    assert not status_file.exists()
 
 
 # CLI
@@ -543,6 +690,7 @@ def test_validate_points_to_doctor_when_the_config_has_errors(tmp_path, capsys):
 def app(tmp_path):
     controller = MagicMock(daemon_mode=False, is_running=True)
     controller.list_servers.return_value = build_session()
+    controller.supervisor.cancelled = controller.stop_event
     with patch.object(tray_module, "get_server_controller", return_value=controller), \
             patch.object(tray_module, "UpdateChecker"), patch.object(tray_module.MCPTrayApp, "_read_config", return_value=None):
         app = tray_module.MCPTrayApp()
@@ -587,6 +735,12 @@ def test_a_daemon_session_is_not_read_from_the_tray_memory(app):
     app.server_controller.daemon_mode = True
 
     assert app.list_local_session() is None
+
+
+def test_a_restart_still_checking_the_platform_never_shows_the_last_runs_servers(app):
+    app.server_controller.stop_event = threading.Event()
+
+    assert app.list_local_session() == []
 
 
 def test_a_failed_start_points_to_run_diagnostics(app):

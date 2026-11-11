@@ -111,6 +111,9 @@ class ServerSupervisor:
     def start(self):
         """Load and register the healthy servers while retries wait; False, unconnected, when none is healthy or the run was stopped."""
         with self._retry_lock:
+            if self.cancelled.is_set():
+                return False
+            self.session_status.start()
             self.load()
             if self.cancelled.is_set():
                 return False
@@ -121,17 +124,21 @@ class ServerSupervisor:
                 return False
             self.link = start_socket_connection(self.config, self.registry, self.notify_status, self.notify_error,
                                                 self.handle_server_failure)
-            self.session_status.start()
+            self.session_status.publish()
             self.notify_server(self.summarize())
             for entry in self.registry.list_by_status(FAILED):
                 self.schedule_retry(entry.name)
             return True
 
-    def stop(self):
+    def halt(self):
+        """End the session at once without waiting on the platform, so a Stop from the tray menu never blocks on the disconnect."""
         self._stopped = True
         self.session_status.stop()
         for name in list(self._timers):
             self.cancel_retry(name)
+
+    def stop(self):
+        self.halt()
         if self.link is not None:
             self.link.disconnect()
 

@@ -282,6 +282,8 @@ class ServerController:
         else:
             # Stop embedded servers
             self.stop_event.set()
+            if self.supervisor is not None:
+                self.supervisor.halt()
             
             if self.server_thread and self.server_thread.is_alive():
                 # Give it a few seconds to stop gracefully

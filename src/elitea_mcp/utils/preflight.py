@@ -27,6 +27,7 @@ class PlatformCheckRun:
     checks: list = field(default_factory=list)
     origin: Optional[str] = None
     project_id: Optional[int] = None
+    reachable: bool = False
     headers: Optional[dict] = None
 
 
@@ -70,12 +71,17 @@ def check_platform_reachable(run, config, verify, notify):
     origin = require_origin(run)
     started = time.monotonic()
     validate_platform_reachable(origin, verify)
+    run.reachable = True
     return f"{origin}, {round((time.monotonic() - started) * 1000)} ms"
 
 
 def check_token(run, config, verify, notify):
+    """Send the token only to an address that answered like ELITEA, never to a mistyped or hostile one."""
     origin = require_origin(run)
-    headers = {"Authorization": f"Bearer {validate_auth_token(config.get('auth_token'))}"}
+    token = validate_auth_token(config.get("auth_token"))
+    if not run.reachable:
+        raise PreflightError("Cannot check the token until the platform is reachable.")
+    headers = {"Authorization": f"Bearer {token}"}
     validate_token_accepted(origin, headers, verify)
     run.headers = headers
     return "accepted"

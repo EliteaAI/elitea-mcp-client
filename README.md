@@ -550,7 +550,7 @@ ELITEA MCP doctor
   ✓ Token: accepted
   ✗ Local server "github" (stdio): command "npx" not found
       Install Node.js or use the full path in "command".
-  ⚠ Running client: another client is connected with this config; servers were started a second time for this check, so a server that holds a port may fail here only
+  ⚠ Running client: another client is running servers with this config; servers were started a second time for this check, so a server that holds a port may fail here only
   ⚠ Running session: "jira" (stdio): declined (name already registered)
 
 1 problem, 2 warnings.
@@ -559,7 +559,7 @@ ELITEA MCP doctor
 - ✓ passed, ⚠ worth a look, ✗ broken. The exit code is 1 only when a line is ✗.
 - The report never contains the token, header or `env` values, or a server's own output, and shows every URL as scheme and host only, since hosted MCP servers often carry a key in the URL path. When a failed server wrote output, its line ends with `Details: <file>`, the same masked `<server>-error.txt` the tray's **Servers** menu opens.
 - The tray saves the report as `elitea-mcp-diagnostics.txt` next to the tray log, opens it and copies it to the clipboard, ready to paste into a support request.
-- A running client (tray or `serve`) writes its server status to `status.json` in the config folder (owner-only), so the doctor can show the running session; a client that stops updating it for 60 s is reported as possibly frozen.
+- While a tray or `serve` runs servers, it writes their status to `status.json` in the config folder (owner-only) and removes it when the servers stop, so the doctor can show the running session; a session that stops updating it for 60 s is reported as possibly frozen.
 
 #### macOS: "Fork Safety" Errors
 If you encounter fork safety errors on macOS, they have been automatically resolved in version 0.1.10+. The client now uses fork-safe daemon mode for GUI applications.

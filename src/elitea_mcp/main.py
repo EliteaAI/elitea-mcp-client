@@ -22,111 +22,19 @@ from .clients.elitea import Agent, Agents, ApiDetailsRequestError
 from .server.mcp import run
 from .utils.diagnostics import DOCTOR_HINT, REPORT_TITLE, DoctorContext, exit_code, format_results, run_checks, summarize
 from .utils.package_updates import get_installed_version
+from .utils.logging_setup import (CLI, DAEMON, OWNER_ONLY_FILE_MODE, OWNER_ONLY_FOLDER_MODE, RUN_SSE, RUN_STDIO, SERVE,
+                                  build_daemon_output_path, register_log_secrets, report_unwritable_log, restrict_to_owner,
+                                  setup_logging)
 from .utils.preflight import PreflightError, validate_platform_config
+from .utils.server_loader import redact_urls
 
 
-# Configure logging - avoid stdout to prevent MCP stdio interference
-def configure_logging(use_stdout=True, level=logging.WARNING):
-    """Configure logging, optionally avoiding stdout for MCP stdio compatibility."""
-    handlers = []
-    if use_stdout:
-        handlers.append(logging.StreamHandler(sys.stdout))
-    else:
-        # Use stderr instead of stdout to avoid MCP stdio interference
-        handlers.append(logging.StreamHandler(sys.stderr))
-    
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=handlers,
-        force=True  # Override any existing configuration
-    )
-
-# Default logging configuration
-configure_logging(use_stdout=True)
 logger = logging.getLogger(__name__)
 
-def rotate_log_file(log_file, max_bytes=5 * 1024 * 1024, backup_count=5):
-    """Rotate log file if it exceeds ``max_bytes``."""
-    path = Path(log_file)
-    if not path.exists() or path.stat().st_size < max_bytes:
-        return
-
-    # Remove the oldest file if it exists
-    oldest = path.with_suffix(path.suffix + f".{backup_count}")
-    if oldest.exists():
-        try:
-            oldest.unlink()
-        except (PermissionError, FileNotFoundError) as e:
-            logger.warning(f"Failed to delete oldest log file {oldest}: {e}")
-
-    # Shift existing files
-    for i in range(backup_count - 1, 0, -1):
-        src = path.with_suffix(path.suffix + f".{i}")
-        if src.exists():
-            dst = path.with_suffix(path.suffix + f".{i+1}")
-            try:
-                src.rename(dst)
-            except (PermissionError, FileNotFoundError) as e:
-                logger.warning(f"Failed to rename log file {src} to {dst}: {e}")
-
-    try:
-        path.rename(path.with_suffix(path.suffix + ".1"))
-    except (PermissionError, FileNotFoundError) as e:
-        logger.warning(f"Failed to rename log file {path} to {path.with_suffix(path.suffix + '.1')}: {e}")
-
-
-def setup_file_logger(log_file, max_bytes=5 * 1024 * 1024, backup_count=5):
-    """
-    Set up a rotating file handler for logging and add it to the root logger.
-    
-    Args:
-        log_file (str): Path to the log file
-        max_bytes (int): Maximum size in bytes before rotation
-        backup_count (int): Number of backup files to keep
-    """
-    from logging.handlers import RotatingFileHandler
-    
-    # Create directory if it doesn't exist
-    log_path = Path(log_file)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Create a rotating file handler
-    file_handler = RotatingFileHandler(
-        log_file, 
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding='utf-8'
-    )
-    
-    # Set formatter
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    
-    # Set level
-    file_handler.setLevel(logging.DEBUG)
-    
-    # Add to root logger
-    root_logger = logging.getLogger()
-    root_logger.addHandler(file_handler)
-    
-    # Return handler in case it needs to be removed later
-    return file_handler
 
 def main(project_id=None, application_id=None, version_id=None, transport="stdio", port=8000, 
          deployment_url=None, auth_token=None, host=None):
-    # Reconfigure logging for stdio transport to avoid interference
-    if transport == "stdio":
-        configure_logging(use_stdout=False)
-        # Set root logging level to WARNING to minimize interference
-        logging.getLogger().setLevel(logging.WARNING)
-        # Set the specific MCP server logger to DEBUG to see our debugging output when needed
-        # To enable debug logs, set environment variable: ELITEA_MCP_DEBUG=1
-        debug_enabled = os.environ.get('ELITEA_MCP_DEBUG', '0') == '1'
-        if debug_enabled:
-            logging.getLogger('elitea_mcp.server.mcp').setLevel(logging.DEBUG)
-        else:
-            logging.getLogger('elitea_mcp.server.mcp').setLevel(logging.WARNING)
+    setup_logging(RUN_STDIO if transport == "stdio" else RUN_SSE, read_config_leniently())
         
     # Use command-line arguments if provided, otherwise get configuration from bootstrap
     if deployment_url and auth_token:
@@ -189,16 +97,32 @@ def main(project_id=None, application_id=None, version_id=None, transport="stdio
     except ApiDetailsRequestError as error:
         logger.error(str(error))
         return
-        
-    logger.debug(f"Config: {config}")
-    
-    logger.info(f"Starting MCP server for project {project_id}")
+
+    register_log_secrets({"auth_token": auth_token})
+    logger.info(f"Starting MCP server for project {project_id} on {redact_urls(deployment_url)}")
     if application_id:
         logger.info(f"Using application: {application_id}" + 
               (f", version: {version_id}" if version_id else ""))
     else:
         logger.info("Using all available project agents")
     run(client, transport=transport, host=host, port=port)
+
+def find_default_log_file(key):
+    """The default log path, or None when its folder cannot be created, so the command still runs and logs to the console."""
+    try:
+        return str(get_default_paths()[key])
+    except OSError as error:
+        report_unwritable_log(error)
+        return None
+
+
+def read_config_leniently():
+    """The config for choosing the log level of `run`, which must start even when the file is broken or missing."""
+    try:
+        return load_config()
+    except (ConfigError, OSError):
+        return {}
+
 
 def parse_config_port(value):
     """Return the configured port as a number, or None after logging why it cannot be listened on."""
@@ -236,6 +160,8 @@ def macos_gui_daemonize(pid_file=None, log_file=None):
             cmd = [python_cmd, '-m', 'elitea_mcp.main', 'tray']
         else:
             cmd = [elitea_mcp_cmd, 'tray']
+        if log_file:
+            cmd += ['--log-file', str(log_file)]
         
         # Set up environment for the subprocess
         env = os.environ.copy()
@@ -244,16 +170,12 @@ def macos_gui_daemonize(pid_file=None, log_file=None):
         
         # Start subprocess in background (nohup equivalent)
         if log_file:
-            # Setup logging before starting the process
-            setup_file_logger(log_file)
-            logger.debug(f"Set up logging to file: {log_file}")
-            
-            with open(log_file, 'a') as log:
+            with open_daemon_output(log_file) as output:
                 process = subprocess.Popen(
                     cmd,
                     env=env,
-                    stdout=log,
-                    stderr=log,
+                    stdout=output,
+                    stderr=output,
                     stdin=subprocess.DEVNULL,
                     start_new_session=True,  # Detach from parent session
                     preexec_fn=None  # Don't use preexec_fn on macOS
@@ -283,6 +205,15 @@ def macos_gui_daemonize(pid_file=None, log_file=None):
         logger.error(f"Failed to start macOS GUI daemon: {e}")
         return False
 
+def open_daemon_output(log_file):
+    """The owner-only file a daemon's stdout and stderr go to, apart from the rotating log that logging writes."""
+    path = build_daemon_output_path(log_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stream = open(path, "ab")
+    restrict_to_owner(path, OWNER_ONLY_FILE_MODE)
+    return stream
+
+
 def daemonize(pid_file=None, log_file=None):
     """
     Daemonize the current process for Unix systems.
@@ -304,7 +235,6 @@ def daemonize(pid_file=None, log_file=None):
     # Decouple from parent environment
     os.chdir("/")
     os.setsid()
-    os.umask(0)
     
     try:
         # Second fork
@@ -325,14 +255,9 @@ def daemonize(pid_file=None, log_file=None):
         os.dup2(si.fileno(), sys.stdin.fileno())
     
     if log_file:
-        # Configure logging to file with rotation
-        setup_file_logger(log_file)
-        
-        # Still redirect stdout/stderr to the log file
-        with open(log_file, 'a+') as so:
-            os.dup2(so.fileno(), sys.stdout.fileno())
-        with open(log_file, 'a+') as se:
-            os.dup2(se.fileno(), sys.stderr.fileno())
+        with open_daemon_output(log_file) as output:
+            os.dup2(output.fileno(), sys.stdout.fileno())
+            os.dup2(output.fileno(), sys.stderr.fileno())
     else:
         with open('/dev/null', 'a+') as so:
             os.dup2(so.fileno(), sys.stdout.fileno())
@@ -380,6 +305,8 @@ def get_default_paths():
         # Create directories if they don't exist
         pid_dir.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
+        if log_dir.stat().st_uid == os.getuid():
+            restrict_to_owner(log_dir, OWNER_ONLY_FOLDER_MODE)
         
         return {
             'serve_pid': pid_dir / 'elitea-mcp-serve.pid',
@@ -470,6 +397,7 @@ def cli():
 
 
 def run_cli():
+    setup_logging(CLI)
     parser = argparse.ArgumentParser(description='MCP Client')
     parser.add_argument('--version', action='version',
                         version=f"elitea-mcp {get_installed_version() or 'unknown (source checkout)'}")
@@ -536,9 +464,9 @@ def run_cli():
             logger.info(f"Log file: {log_file}")
             
             if daemonize(str(pid_file), str(log_file)):
-                run_servers()
+                run_servers(DAEMON, str(log_file))
         else:
-            run_servers()
+            run_servers(SERVE, args.log_file or find_default_log_file('serve_log'))
             
     elif args.command == "tray":
         # Fix for macOS fork safety with GUI applications
@@ -579,12 +507,12 @@ def run_cli():
             else:
                 # Traditional Unix daemonization for non-macOS systems
                 if daemonize(str(pid_file), str(log_file)):
-                    run_tray()
+                    run_tray(log_file=str(log_file), daemon=True)
         else:
             # Normal mode or daemon subprocess
             if is_daemon_subprocess:
                 logger.info("Running in macOS daemon subprocess...")
-            run_tray()
+            run_tray(log_file=args.log_file, daemon=is_daemon_subprocess)
     elif args.command == "run" or args.command is None:
         main(
             project_id=args.project_id if hasattr(args, 'project_id') else None,

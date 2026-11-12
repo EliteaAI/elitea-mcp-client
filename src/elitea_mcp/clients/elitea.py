@@ -13,7 +13,7 @@ class ApiDetailsRequestError(Exception):
 
 def _describe_failure(response) -> str:
     """Summarise a failed platform response by status code and error field, keeping the raw body out of user-facing messages."""
-    logger.debug("Platform response %s: %s", response.status_code, response.text)
+    logger.debug("Platform response %s: %s characters", response.status_code, len(response.text))
     try:
         body = response.json()
     except ValueError:
@@ -83,7 +83,7 @@ class Agents():
         response = requests.get(url, headers=self.headers, verify=False)
         if response.status_code != 200:
             raise ApiDetailsRequestError(f"Failed to fetch agent details: {_describe_failure(response)}")
-        logger.debug(f"Response: {response.json()}")
+        logger.debug(f"Agents listed: {len(response.json().get('rows', []))}")
         for app in response.json().get("rows", []):
             app_version =self._get_app_version_id(app.get("id"))
             self.agents.append(

@@ -151,7 +151,7 @@ def test_validate_exits_non_zero_for_a_missing_config(tmp_path, monkeypatch, cap
 
 def test_other_commands_print_the_readable_error_instead_of_a_traceback(config_file, monkeypatch, capsys):
     config_file.write_text('{"a": 1,}', encoding="utf-8")
-    monkeypatch.setattr(main_module, "run_servers", load_config)
+    monkeypatch.setattr(main_module, "run_servers", lambda *args: load_config())
     assert run_cli(monkeypatch, "serve") == 1
     assert "Hint: Remove the comma after the last item." in capsys.readouterr().err
 

@@ -459,7 +459,7 @@ def run_with_config_port(monkeypatch, transport, port):
     monkeypatch.setattr(main_module, "get_bootstrap_config", lambda: {**PLATFORM, "port": port})
     monkeypatch.setattr(main_module, "validate_platform_config", lambda config, notify: config)
     monkeypatch.setattr(main_module, "Agents", MagicMock())
-    monkeypatch.setattr(main_module, "configure_logging", MagicMock())
+    monkeypatch.setattr(main_module, "setup_logging", MagicMock())
     run = MagicMock()
     monkeypatch.setattr(main_module, "run", run)
     main_module.main(project_id=2, transport=transport)

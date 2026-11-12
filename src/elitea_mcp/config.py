@@ -1,7 +1,6 @@
 import json
 import os
 import logging
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -61,12 +60,12 @@ def save_config(config):
     write_file_atomically(config_file, json.dumps(config, indent=2))
 
 
-def write_file_atomically(path, text):
-    """Write text to path through a temporary file and one rename, so readers never see a partial file."""
+def write_file_atomically(path, content):
+    """Write text or bytes to path through a temporary file and one rename, so readers never see a partial file and only the owner can read it."""
     descriptor, temp_path = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as f:
-            f.write(text)
+        with (os.fdopen(descriptor, "wb") if isinstance(content, bytes) else os.fdopen(descriptor, "w", encoding="utf-8")) as f:
+            f.write(content)
             f.flush()
             os.fsync(f.fileno())
         os.replace(temp_path, path)
@@ -82,7 +81,7 @@ def backup_valid_config(config_file):
         load_config(config_file)
     except ConfigError:
         return
-    shutil.copyfile(config_file, backup_file_for(config_file))
+    write_file_atomically(backup_file_for(config_file), config_file.read_bytes())
 
 def set_bootstrap_config(deployment_url, auth_token, host='0.0.0.0', port=8000):
     """Set bootstrap configuration values."""

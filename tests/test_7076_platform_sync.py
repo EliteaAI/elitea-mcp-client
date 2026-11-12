@@ -10,8 +10,10 @@ import socketio
 
 from src.elitea_mcp.utils import sio as sio_module
 from src.elitea_mcp.utils.client_identity import read_machine_part
+from src.elitea_mcp.utils.logging_setup import SERVE, setup_logging
 from src.elitea_mcp.utils.server_loader import (EXITED, INVALID_CONFIG, TIMEOUT, UNREACHABLE, ServerFailure, ServerLoad,
                                                 load_servers, read_startup_timeout, redact_urls)
+from src.elitea_mcp.utils.server_output import flush_server_output
 from src.elitea_mcp.utils.server_registry import DECLINED, FAILED, HEALTHY, REGISTERED, ServerRegistry
 from src.elitea_mcp.utils.sio import start_socket_connection
 from tests import fixtures_7076 as fixtures
@@ -472,9 +474,11 @@ def test_an_update_the_platform_never_answers_keeps_the_socket(protocol_2_platfo
 
 def test_what_a_server_writes_during_a_tool_call_still_reaches_the_console(tmp_path, capfd):
     server = fixtures.healthy(tmp_path)
+    setup_logging(SERVE, log_file=tmp_path / "serve.log")
 
     assert sio_module._mcp_tools_call_sync(server, {"name": "echo", "arguments": {"text": "visible"}}, server_name="ok") == "visible"
 
+    assert flush_server_output()
     assert "echo server log: visible" in capfd.readouterr().err
 
 

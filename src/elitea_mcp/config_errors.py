@@ -23,6 +23,7 @@ class ConfigMistake(Enum):
     NOT_OBJECT = "The whole file must be one JSON object wrapped in { }."
     NOT_UTF8 = "Save the file with UTF-8 encoding."
     UNKNOWN = "Check the JSON syntax at this position."
+    DUPLICATE_KEY = "Remove the repeated key yourself; rewriting the file now would keep only the last one."
 
     @property
     def hint(self):

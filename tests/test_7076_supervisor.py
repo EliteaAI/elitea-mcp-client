@@ -39,6 +39,13 @@ def fake_platform():
     return patch.object(supervisor_module, "start_socket_connection", side_effect=connect), link
 
 
+def supervisor_stopped_by_ctrl_c(*args, **kwargs):
+    """A real supervisor whose session wait in serve is interrupted as by Ctrl+C."""
+    supervisor = ServerSupervisor(*args, **kwargs)
+    supervisor.cancelled = MagicMock(wait=MagicMock(side_effect=KeyboardInterrupt), is_set=MagicMock(return_value=False))
+    return supervisor
+
+
 def failure_load(name, kind, reason="it broke"):
     return ServerLoad(name, "stdio", failure=ServerFailure(kind, reason, "Fix it."))
 
@@ -281,7 +288,7 @@ def test_serve_prints_a_table_and_the_masked_last_lines_of_a_failed_server(mock_
     platform, _ = fake_platform()
 
     with patch.object(run_servers_module, "load_config", return_value={**PLATFORM, "servers": servers}), platform, \
-            patch("builtins.input", side_effect=KeyboardInterrupt), pytest.raises(SystemExit):
+            patch.object(run_servers_module, "ServerSupervisor", supervisor_stopped_by_ctrl_c), pytest.raises(SystemExit):
         run_servers_module.run_servers()
 
     out = capsys.readouterr().out

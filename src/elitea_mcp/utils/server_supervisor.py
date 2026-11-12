@@ -58,9 +58,10 @@ def ignore_message(message):
 
 class ServerSupervisor:
     def __init__(self, config, skipped=(), notify_status=None, notify_error=None, notify_server=None, on_change=None,
-                 summary_suffix="", cancelled=None):
+                 summary_suffix="", cancelled=None, on_session_ended=None):
         self.config = config
         self.cancelled = cancelled or threading.Event()
+        self.on_session_ended = on_session_ended or (lambda: None)
         self.notify_status = notify_status or ignore_message
         self.notify_error = notify_error or ignore_message
         self.notify_server = notify_server or ignore_message
@@ -126,12 +127,17 @@ class ServerSupervisor:
                 self.notify_error(self.summarize())
                 return False
             self.link = start_socket_connection(self.config, self.registry, self.notify_status, self.notify_error,
-                                                self.handle_server_failure)
+                                                self.handle_server_failure, self.end_session)
             self.session_status.publish()
             self.notify_server(self.summarize())
             for entry in self.registry.list_by_status(FAILED):
                 self.schedule_retry(entry.name)
             return True
+
+    def end_session(self):
+        """The platform ended the session for good and no reconnect follows, so cancel the run instead of idling unregistered."""
+        self.on_session_ended()
+        self.cancelled.set()
 
     def halt(self):
         """End the session at once without waiting on the platform, so a Stop from the tray menu never blocks on the disconnect."""

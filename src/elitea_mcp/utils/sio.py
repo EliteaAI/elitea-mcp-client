@@ -126,9 +126,10 @@ def _sanitize_server_tools(all_tools: Any) -> List[Dict[str, Any]]:
 
 
 def start_socket_connection(config, registry, notify_status: Callable[[str], None] = None,
-                            notify_error: Callable[[str], None] = None, on_server_failed: Callable[[str], None] = None):
+                            notify_error: Callable[[str], None] = None, on_server_failed: Callable[[str], None] = None,
+                            on_session_ended: Callable[[], None] = None):
     """Connect to the platform and register the registry's healthy servers, raising PlatformConnectionError when that fails."""
-    link = PlatformLink(config, registry, notify_status, notify_error, on_server_failed)
+    link = PlatformLink(config, registry, notify_status, notify_error, on_server_failed, on_session_ended)
     link.connect()
     return link
 
@@ -136,12 +137,13 @@ def start_socket_connection(config, registry, notify_status: Callable[[str], Non
 class PlatformLink:
     """The socket to the platform and the snapshots of this client's servers that are sent over it."""
 
-    def __init__(self, config, registry, notify_status=None, notify_error=None, on_server_failed=None):
+    def __init__(self, config, registry, notify_status=None, notify_error=None, on_server_failed=None, on_session_ended=None):
         self.config = config
         self.registry = registry
         self.notify_status = notify_status or _ignore_message
         self.notify_error = notify_error or _ignore_message
         self.on_server_failed = on_server_failed or _ignore_message
+        self.on_session_ended = on_session_ended or _ignore_event
         self.startup_timeout = config.get("startup_timeout") or DEFAULT_STARTUP_TIMEOUT
         self.client_id = load_client_id()
         self.platform_protocol = None
@@ -277,6 +279,7 @@ class PlatformLink:
             logger.warning(f"Failed to register on platform: {error}")
             self.notify_error(str(error))
             self.sio.disconnect()
+            self.on_session_ended()
             return
         self.schedule_resync(names, error)
 
@@ -330,6 +333,8 @@ class PlatformLink:
             logger.info("Cleaned up persistent sessions")
         except Exception as e:
             logger.warning(f"Error during session cleanup: {e}")
+        if reason == self.sio.reason.SERVER_DISCONNECT:
+            self.on_session_ended()
 
     def on_mcp_tools_list(self, data):
         """Answer the legacy pull with the servers that load now; nothing on the platform sends it any more."""
@@ -436,6 +441,10 @@ def _connect_with_retries(sio, config, notify_status):
 
 def _ignore_message(message: str):
     """Stand in for a notification callback the caller did not provide."""
+
+
+def _ignore_event():
+    """Stand in for an event callback the caller did not provide."""
 
 
 def _mcp_tools_call_sync(server_conf, params, server_name=None, startup_timeout=DEFAULT_STARTUP_TIMEOUT):

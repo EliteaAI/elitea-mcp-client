@@ -207,6 +207,7 @@ class ServerController:
     def _start_embedded_servers(self) -> bool:
         """Start MCP servers in the current process (embedded mode)."""
         stop_event = threading.Event()
+        failed = threading.Event()
 
         def run_server_loop():
             supervisor = None
@@ -217,24 +218,29 @@ class ServerController:
                 config = validate_platform_config(self.config, self._notify_status)
                 supervisor = ServerSupervisor(config, self.skipped_servers, self._notify_status, self._notify_error,
                                               self._notify_server, self._notify_servers_changed,
-                                              summary_suffix="See Servers menu.", cancelled=stop_event)
+                                              summary_suffix="See Servers menu.", cancelled=stop_event,
+                                              on_session_ended=failed.set)
                 self.supervisor = supervisor
                 if not supervisor.start():
+                    if not stop_event.is_set():
+                        failed.set()
                     return
 
                 while not stop_event.is_set():
                     time.sleep(SERVER_RESTART_DELAY)
 
             except (PreflightError, PlatformConnectionError) as error:
+                failed.set()
                 self._notify_error(str(error))
             except Exception as e:
+                failed.set()
                 self._notify_error(f"Server error: {str(e)}")
             finally:
                 if supervisor is not None:
                     supervisor.stop()
                 if self.stop_event is stop_event:
                     self.is_running = False
-                    self._notify_status("MCP servers stopped")
+                    self._notify_status("" if failed.is_set() else "MCP servers stopped")
                 
         self.stop_event = stop_event
         self.server_thread = threading.Thread(target=run_server_loop, daemon=True)

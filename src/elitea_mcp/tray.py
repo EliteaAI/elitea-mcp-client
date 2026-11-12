@@ -31,7 +31,7 @@ if platform.system() == "Darwin":
 
 import pystray
 from PIL import Image, ImageDraw
-from .config_errors import ConfigError
+from .config_errors import ConfigError, ConfigMistake
 from .config import (SCHEMA_REFERENCE, get_bootstrap_config, set_bootstrap_config, interactive_bootstrap,
                      get_config_file, load_config, save_config)
 from .config_model import NOTIFICATION_LIMIT, check_config, write_config_schema
@@ -853,9 +853,12 @@ def has_duplicate_keys(value):
 
 
 def save_log_level(level):
-    """Write only "log_level" into config.json, keeping every other key, and only when it changes."""
+    """Write only "log_level" into config.json, keeping every other key, and only when it changes; refuse when a rewrite would drop a repeated key."""
     config_file = get_config_file()
     raw = load_config() if config_file.exists() else {"$schema": SCHEMA_REFERENCE}
+    if has_duplicate_keys(raw):
+        raise ConfigError(config_file, "Config file has duplicate keys", "Debug logging was not saved, so no key is lost",
+                          ConfigMistake.DUPLICATE_KEY)
     if str(raw.get("log_level", INFO)).strip().lower() == level and config_file.exists():
         return
     raw["log_level"] = level

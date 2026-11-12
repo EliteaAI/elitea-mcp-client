@@ -686,3 +686,15 @@ def test_an_error_the_supervisor_reports_during_serve_is_logged_as_an_error(tmp_
 
     assert capsys.readouterr().out.count("Disconnected by the platform") == 1
     assert "ERROR - Disconnected by the platform" in (tmp_path / "serve.log").read_text()
+
+
+def test_the_switch_refuses_to_rewrite_a_file_with_duplicate_keys_even_when_the_menu_is_stale(config_file, tmp_path):
+    original = '{"servers": {"a": {"command": "npx"}, "a": {"command": "uvx"}}}'
+    config_file.write_text(original, encoding="utf-8")
+    app = build_tray_app(tmp_path)
+
+    app.toggle_debug_logging()
+
+    assert config_file.read_text() == original
+    assert not is_debug_logging()
+    assert "duplicate keys" in app.show_error.call_args.args[1]

@@ -45,6 +45,8 @@ URL_TRAILING_PUNCTUATION = ".,:;)\"'"
 AUTH_STATUS_CODES = (401, 403)
 SLOW_DOWN_STATUS_CODES = (429, 503)
 ON_WINDOWS = os.name == "nt"
+WINDOWS_SYSTEM_LOCATIONS = ("PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES",
+                            "COMMONPROGRAMFILES(X86)", "COMMONPROGRAMW6432", "PROGRAMDATA", "WINDIR", "COMSPEC", "TMP")
 INSTALL_HINTS = {
     "npx": "Install Node.js",
     "node": "Install Node.js",
@@ -167,8 +169,16 @@ async def open_streams(server_conf, errlog):
         async with sse_client(server_conf["url"], server_conf.get("headers") or {}) as (read, write):
             yield read, write
     else:
-        async with stdio_client(StdioServerParameters(**server_conf), errlog=errlog or sys.stderr) as (read, write):
+        async with stdio_client(build_stdio_parameters(server_conf), errlog=errlog or sys.stderr) as (read, write):
             yield read, write
+
+
+def build_stdio_parameters(server_conf):
+    """Pass Windows system folders the SDK leaves out, so a server finds software installed under Program Files."""
+    if not ON_WINDOWS:
+        return StdioServerParameters(**server_conf)
+    system_locations = {name: os.environ[name] for name in WINDOWS_SYSTEM_LOCATIONS if name in os.environ}
+    return StdioServerParameters(**{**server_conf, "env": {**system_locations, **(server_conf.get("env") or {})}})
 
 
 def find_missing_command(server_conf):

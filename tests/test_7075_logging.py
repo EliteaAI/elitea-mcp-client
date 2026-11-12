@@ -669,3 +669,20 @@ def test_replacing_an_earlier_secret_does_not_shift_which_values_are_held_back()
     masked = mask_secrets(["token=long-secret-value-7075 mode=https url=https://h/x?api_key=UNCONFIGURED1"], secrets)[0]
 
     assert "long-secret-value-7075" not in masked and "UNCONFIGURED1" not in masked
+
+
+def test_an_error_the_supervisor_reports_during_serve_is_logged_as_an_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(run_servers_module, "load_config", lambda: {"servers": {"github": {"command": "npx"}}})
+    monkeypatch.setattr(run_servers_module, "write_config_schema", MagicMock())
+    monkeypatch.setattr(run_servers_module, "validate_platform_config", lambda config: config)
+    supervisor_class = MagicMock()
+    supervisor_class.return_value.start.return_value = False
+    supervisor_class.return_value.registry.list_entries.return_value = []
+    monkeypatch.setattr(run_servers_module, "ServerSupervisor", supervisor_class)
+
+    with pytest.raises(SystemExit):
+        run_servers_module.run_servers(SERVE, str(tmp_path / "serve.log"))
+    supervisor_class.call_args.kwargs["notify_error"]("Disconnected by the platform")
+
+    assert capsys.readouterr().out.count("Disconnected by the platform") == 1
+    assert "ERROR - Disconnected by the platform" in (tmp_path / "serve.log").read_text()

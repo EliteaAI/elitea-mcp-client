@@ -31,8 +31,8 @@ def run_servers(log_mode=SERVE, log_file=None):
     show("\nMcp Servers from configuration:")
     show(", ".join(config["servers"].keys()))
     show("\nConnecting to the servers...")
-    supervisor = ServerSupervisor(config, collect_skipped_servers(report, raw_config), notify_error=show_error,
-                                  notify_server=show)
+    supervisor = ServerSupervisor(config, collect_skipped_servers(report, raw_config),
+                                  notify_error=lambda message: show(message, logging.ERROR), notify_server=show)
     try:
         started = supervisor.start()
     except PlatformConnectionError as error:
@@ -61,10 +61,6 @@ def show(message, level=logging.INFO, file=None):
     print(message, file=file)
     if message.strip():
         logger.log(level, message.strip(), extra={"console": False})
-
-
-def show_error(message):
-    show(message, logging.ERROR)
 
 
 def print_server_table(supervisor):

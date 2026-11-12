@@ -471,8 +471,8 @@ class MCPTrayApp:
             self.show_notification("Server Status", status)
     
     def on_server_error(self, error: str):
-        """Handle server errors."""
-        self.is_server_running = False
+        """Report an error without guessing the run state, which only the controller knows: a live session can report one."""
+        self.is_server_running = self.server_controller.is_running
         self.update_menu()
         self.show_error("Server Error", f"{error} {TRAY_DIAGNOSTICS_HINT}")
 

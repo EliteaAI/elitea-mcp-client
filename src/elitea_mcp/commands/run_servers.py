@@ -11,6 +11,8 @@ from ..utils.server_output import flush_server_output
 from ..utils.server_supervisor import ServerSupervisor, collect_skipped_servers
 from ..utils.sio import PlatformConnectionError
 
+CTRL_C_POLL_SECONDS = 1
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,14 +48,17 @@ def run_servers(log_mode=SERVE, log_file=None):
 
     try:
         show(f"\nStarting MCP client...")
-        while True:
-            user_input = input("").strip()
-
+        while not supervisor.cancelled.wait(CTRL_C_POLL_SECONDS):
+            pass
     except KeyboardInterrupt:
         show("\nExiting application...")
         supervisor.stop()
         flush_server_output()
         sys.exit(0)
+    show(DOCTOR_HINT, logging.ERROR)
+    supervisor.stop()
+    flush_server_output()
+    sys.exit(1)
 
 
 def show(message, level=logging.INFO, file=None):

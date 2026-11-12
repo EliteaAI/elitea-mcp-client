@@ -280,12 +280,15 @@ class MCPTrayApp:
         
         diagnostics_label = "Running Diagnostics…" if self.diagnostics_running else "Run Diagnostics"
         menu_items.extend([
-            pystray.MenuItem("Help", pystray.Menu(
-                pystray.MenuItem(diagnostics_label, self.run_diagnostics, enabled=not self.diagnostics_running),
+            pystray.MenuItem("Logs", pystray.Menu(
                 pystray.MenuItem("Open Log File", self.open_log_file),
                 pystray.MenuItem("Open Logs Folder", self.open_logs_folder),
-                pystray.MenuItem("Debug Logging", self.toggle_debug_logging, checked=lambda item: is_debug_logging(),
+                pystray.MenuItem("Enable Debug Logging", self.toggle_debug_logging,
+                                 checked=lambda item: is_debug_logging(),
                                  enabled=config is not None and not self.has_duplicate_keys),
+            )),
+            pystray.MenuItem("Help", pystray.Menu(
+                pystray.MenuItem(diagnostics_label, self.run_diagnostics, enabled=not self.diagnostics_running),
             )),
             pystray.MenuItem("About", self.show_about),
             pystray.MenuItem("Quit", self.quit_app),

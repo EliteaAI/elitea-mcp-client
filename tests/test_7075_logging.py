@@ -455,10 +455,13 @@ def test_the_switch_is_offered_only_when_a_rewrite_cannot_lose_anything(config_f
     config_file.write_text('{"servers": {"a": {"command": "npx"}, "a": {"command": "uvx"}}}', encoding="utf-8")
     app = tray_module.MCPTrayApp()
 
-    help_items = next(item for item in app.get_menu_items() if item.text == "Help").submenu.items
+    menu = app.get_menu_items()
+    log_items = next(item for item in menu if item.text == "Logs").submenu.items
+    help_items = next(item for item in menu if item.text == "Help").submenu.items
 
-    assert [item.text for item in help_items][:4] == ["Run Diagnostics", "Open Log File", "Open Logs Folder", "Debug Logging"]
-    assert not help_items[3].enabled
+    assert [item.text for item in log_items] == ["Open Log File", "Open Logs Folder", "Enable Debug Logging"]
+    assert [item.text for item in help_items] == ["Run Diagnostics"]
+    assert not log_items[2].enabled
     assert tray_module.has_duplicate_keys(parse_config('{"a": {"b": 1, "b": 2}}', config_file))
 
 
@@ -698,3 +701,20 @@ def test_the_switch_refuses_to_rewrite_a_file_with_duplicate_keys_even_when_the_
     assert config_file.read_text() == original
     assert not is_debug_logging()
     assert "duplicate keys" in app.show_error.call_args.args[1]
+
+
+@pytest.mark.parametrize("name, value, shown", [
+    ("PORT", "3000", True), ("DEBUG", "true", True), ("VERBOSE", "False", True),
+    ("PASSWORD", "12345", False), ("DB_PASS", "admin", False), ("API_KEY", "54321", False), ("PIN", "1234", False),
+    ("AUTH_RETRIES", "3000", False), ("CODE", "123456", False), ("GITHUB", "ghp_7075abcdef", False),
+])
+def test_a_short_number_or_flag_is_shown_unless_its_name_suggests_a_credential(name, value, shown):
+    masked = mask_secrets([f"duration_ms=1{value} localhost:{value} value={value}"], collect_secret_values({}, {"env": {name: value}}))[0]
+
+    assert (value in masked) is shown
+
+
+def test_a_header_and_the_token_stay_masked_whatever_their_value():
+    secrets = collect_secret_values({"auth_token": "30000"}, {"headers": {"Authorization": "3000", "X-Count": "2000"}})
+
+    assert mask_secrets(["token 30000 auth 3000 count 2000"], secrets) == ["token **** auth **** count ****"]

@@ -35,6 +35,8 @@ STDERR_TAIL_LINES = 20
 STDERR_TAIL_BYTES = 64 * 1024
 MASK = "****"
 MIN_SECRET_LENGTH = 4
+PLAIN_SETTING_PATTERN = re.compile(r"\d{1,5}|true|false", re.IGNORECASE)
+CREDENTIAL_NAME_PARTS = ("PASS", "SECRET", "TOKEN", "KEY", "PIN", "AUTH")
 URL_PATTERN = re.compile(r"https?://\S+")
 URL_WITH_HOST_PATTERN = re.compile(r"https?://[^\s/?#]\S*")
 URL_HOST_PATTERN = re.compile(r"(https?://)(?:[^\s/@?#]*@)?([^\s/?#]+)")
@@ -306,7 +308,8 @@ def read_stderr_tail(errlog, lines=STDERR_TAIL_LINES):
 
 def collect_secret_values(config, server_conf):
     """The configured values a server's output may echo, in every form a log line may carry them: the platform token, env values and header values."""
-    values = [config.get("auth_token"), *(server_conf.get("env") or {}).values(), *(server_conf.get("headers") or {}).values()]
+    env_values = (value for name, value in (server_conf.get("env") or {}).items() if not is_plain_setting(name, value))
+    values = [config.get("auth_token"), *env_values, *(server_conf.get("headers") or {}).values()]
     secrets = set()
     for value in values:
         if not isinstance(value, str):
@@ -316,6 +319,12 @@ def collect_secret_values(config, server_conf):
         if credential and scheme.lower() in ("bearer", "basic", "token"):
             secrets.update(list_secret_forms(credential))
     return sorted((secret for secret in secrets if len(secret) >= MIN_SECRET_LENGTH), key=len, reverse=True)
+
+
+def is_plain_setting(name, value):
+    """A port, a count or a flag under a name that does not suggest a credential, which masking would garble in every number it appears in."""
+    return (isinstance(value, str) and PLAIN_SETTING_PATTERN.fullmatch(value.strip()) is not None
+            and not any(part in str(name).upper() for part in CREDENTIAL_NAME_PARTS))
 
 
 def list_secret_forms(value):

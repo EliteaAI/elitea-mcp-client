@@ -198,13 +198,15 @@ Right-click the tray icon to access:
 - **Stop MCP Server** - Stop running servers (shows current mode)
 - **Restart MCP Server** - Reload configuration by stopping and starting servers
 
-#### Help
-- **Run Diagnostics** - Run every `elitea-mcp doctor` check, open the report and copy it to the clipboard
+#### Logs
 - **Open Log File** - Open the tray log
 - **Open Logs Folder** - Open the folder with the logs, the `<server>-error.txt` files and the diagnostics report
-- **Debug Logging** - Add detail to the logs at once, without a restart; saved as `"log_level"` in `config.json`
+- **Enable Debug Logging** - Add detail to the logs at once, without a restart; saved as `"log_level"` in `config.json`
 
-#### Logs
+#### Help
+- **Run Diagnostics** - Run every `elitea-mcp doctor` check, open the report and copy it to the clipboard
+
+#### Log files
 The logs are in `~/.local/var/log/elitea-mcp/` on macOS and Linux (`/var/log/elitea-mcp/` when run as root) and in `%TEMP%\elitea-mcp\` on Windows. The default folder and every log file can be read only by you.
 
 | File | Written by |
@@ -214,7 +216,7 @@ The logs are in `~/.local/var/log/elitea-mcp/` on macOS and Linux (`/var/log/eli
 | `elitea-mcp-serve.log`, `elitea-mcp-serve-servers.log` | `elitea-mcp serve`, also in the foreground |
 | `elitea-mcp-tray.out`, `elitea-mcp-serve.out` | a daemon's crash output and anything written outside the log |
 
-Each log keeps 5 MB per file (5 old files for the main log, 3 for server output). Every tool call writes one line with the server, the tool, the result (`ok`, `tool_error`, `start_failed`, `failed`, `server_failed`, `not_running`) and the time it took. Configured secrets (`auth_token`, every `env` and `headers` value of 4 characters or more, also JSON-escaped, URL-encoded or line by line) and every URL query value and user name and password are replaced by `****` in every log line, so a short value such as `PORT=3000` is hidden as well. Tool arguments, tool results and agent conversations are never logged, not even with debug logging on; debug adds only argument names and sizes. `elitea-mcp run` writes no log file: its messages go to the error output, which your IDE keeps in its MCP log. `"log_level": "debug"` in `config.json`, or `ELITEA_MCP_DEBUG=1`, turns on debug logging for `run` too.
+Each log keeps 5 MB per file (5 old files for the main log, 3 for server output). Every tool call writes one line with the server, the tool, the result (`ok`, `tool_error`, `start_failed`, `failed`, `server_failed`, `not_running`) and the time it took. Configured secrets (`auth_token`, every `env` and `headers` value of 4 characters or more, also JSON-escaped, URL-encoded or line by line) and every URL query value and user name and password are replaced by `****` in every log line. An `env` value that is a number of up to 5 digits or `true`/`false` is left visible, so `PORT=3000` does not hide every 3000 in the logs, unless its name contains `PASS`, `SECRET`, `TOKEN`, `KEY`, `PIN` or `AUTH`. A short word such as `jira` is still hidden wherever it appears. Tool arguments, tool results and agent conversations are never logged, not even with debug logging on; debug adds only argument names and sizes. `elitea-mcp run` writes no log file: its messages go to the error output, which your IDE keeps in its MCP log. `"log_level": "debug"` in `config.json`, or `ELITEA_MCP_DEBUG=1`, turns on debug logging for `run` too.
 
 #### Servers
 Shown after the first start, with one row per configured server:
@@ -222,7 +224,7 @@ Shown after the first start, with one row per configured server:
 - `⚠ github — declined (name already registered)` - another running client, or a session that has not timed out yet, holds this name in the project
 - `✗ confluence — failed: command "uvx" not found` - the server could not start; the other servers are not affected
 
-Click a failed or declined row to open `<server>-error.txt` (next to the tray log) with the reason, a hint and the server's last output, with configured secrets (`auth_token`, `env` and `headers` values) replaced by `****`. In these messages a server URL keeps its host and path, its user name and password are removed, and every query and fragment value is shown as `****`. A token written into the URL path (for example `https://mcp.example.com/s/<token>/mcp`) stays visible on this machine; ELITEA only ever receives the URL's scheme and host.
+Click a failed or declined row to open `<server>-error.txt` (next to the tray log) with the reason, a hint and the server's last output, with configured secrets (`auth_token`, `env` and `headers` values, apart from the short numbers and flags described under Log files) replaced by `****`. In these messages a server URL keeps its host and path, its user name and password are removed, and every query and fragment value is shown as `****`. A token written into the URL path (for example `https://mcp.example.com/s/<token>/mcp`) stays visible on this machine; ELITEA only ever receives the URL's scheme and host.
 **Retry Failed Servers** loads only the failed servers again; healthy ones keep running. A server that timed out, could not be reached, or broke after it was working is also retried automatically after about 30 s, 1 min, 2 min and 5 min, then every 5 min for as long as the problem lasts; its row shows `(retrying automatically)` while a retry is pending. When every server fails at start the client does not connect and does not retry on its own; use **Retry Failed Servers**. Each wait is randomised (between half and all of the step) so clients that lost the same server do not all retry at once, and a server that answers 429 or 503 with `Retry-After` is not tried again sooner than it asked. A server that fails again within 10 min of recovering keeps the longer wait. A missing command, an invalid config or a rejected token is never retried automatically.
 
 After a start, a notification summarises the result, for example `3 of 4 MCP servers connected. Failed: confluence (command "uvx" not found).` When every server fails, the client does not connect to ELITEA.

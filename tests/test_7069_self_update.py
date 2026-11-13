@@ -267,7 +267,7 @@ def test_manual_plan_shows_the_command_instead_of_restarting():
     plan = UpgradePlan(["pipx", "upgrade", "elitea-mcp"], reason="pipx was not found on PATH.")
     with patch.object(tray_module, "resolve_upgrade_plan", return_value=plan), \
             patch.object(tray_module, "start_update_helper") as helper, \
-            patch.object(app, "_copy_to_clipboard", return_value=True):
+            patch.object(app.platform, "copy_to_clipboard", return_value=True):
         app.update_and_restart()
     helper.assert_not_called()
     app.icon.stop.assert_not_called()

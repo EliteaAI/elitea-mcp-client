@@ -418,7 +418,7 @@ def build_tray_app(tmp_path):
     app._log_file = tmp_path / "logs" / "elitea-mcp-tray.log"
     app.update_menu = MagicMock()
     app.show_error = MagicMock()
-    app._open_file = MagicMock()
+    app.platform = MagicMock()
     return app
 
 
@@ -471,8 +471,8 @@ def test_open_log_file_opens_the_tray_log_even_before_anything_was_written(tmp_p
     app.open_log_file()
     app.open_logs_folder()
 
-    assert app._open_file.call_args_list[0].args == (app.log_file,)
-    assert app._open_file.call_args_list[1].args == (app.log_file.parent,)
+    assert app.platform.open_file.call_args_list[0].args == (app.log_file,)
+    assert app.platform.open_file.call_args_list[1].args == (app.log_file.parent,)
     assert stat.S_IMODE(app.log_file.stat().st_mode) == 0o600
 
 

@@ -245,7 +245,7 @@ class ServerController:
                 report_error(str(error))
             except Exception as e:
                 failed.set()
-                report_error(f"Server error: {str(e)}")
+                report_error(str(e))
             finally:
                 if supervisor is not None:
                     supervisor.stop()

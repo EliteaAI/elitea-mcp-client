@@ -23,7 +23,7 @@ def app(tmp_path):
     controller.list_servers.return_value = build_registry().list_entries()
     with patch.object(tray_module, "get_server_controller", return_value=controller), patch.object(tray_module, "UpdateChecker"):
         app = tray_module.MCPTrayApp()
-    app._open_file = MagicMock()
+    app.platform.open_file = MagicMock()
     app.show_notification = MagicMock()
     return app
 
@@ -54,13 +54,13 @@ def test_clicking_a_failed_row_writes_and_opens_its_error_file(app, tmp_path):
 
     app.server_controller.format_server_error.assert_called_once_with("confluence")
     assert (tmp_path / "confluence-error.txt").read_text() == "Server details\n"
-    app._open_file.assert_called_once_with(tmp_path / "confluence-error.txt")
+    app.platform.open_file.assert_called_once_with(tmp_path / "confluence-error.txt")
 
 
 def test_clicking_a_healthy_row_opens_nothing(app):
     find_servers_menu(app).items[0](MagicMock())
 
-    app._open_file.assert_not_called()
+    app.platform.open_file.assert_not_called()
 
 
 def test_there_is_no_servers_menu_before_the_first_start(app):

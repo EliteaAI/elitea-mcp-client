@@ -6,7 +6,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.elitea_mcp import tray as tray_module
-from src.elitea_mcp.tray import STATUS_DOT_COLORS, TOOLTIP_LIMIT, UPDATE_BADGE_COLOR, fit_status_text
+from src.elitea_mcp.tray import STATUS_DOT_COLORS, UPDATE_BADGE_COLOR, fit_status_text
+from src.elitea_mcp import tray_platforms
+from src.elitea_mcp.tray_platforms import LinuxTray, TrayPlatform, WindowsTray, XorgTray, get_tray_platform
 from src.elitea_mcp.utils import server_controller as controller_module
 from src.elitea_mcp.utils import server_supervisor as supervisor_module
 from src.elitea_mcp.utils.preflight import PreflightError
@@ -16,7 +18,9 @@ from src.elitea_mcp.utils.server_supervisor import ServerSupervisor
 from src.elitea_mcp.utils.sio import start_socket_connection
 from tests.test_7070_platform_registration import drop_platform, find_free_port, serve_platform, wait_until
 
-PREFIX = "ELITEA MCP Client — "
+PREFIX = "ELITEA MCP Client\n"
+UPDATE_LINE = "\nUpdate 0.2.0 available"
+WINDOWS_TOOLTIP_UNITS = 127
 PLATFORM_ERROR = "Cannot reach https://platform.example"
 
 
@@ -50,33 +54,33 @@ def make_running(controller, entries=(), ready=True):
 
 
 def test_a_client_that_never_ran_is_stopped_with_no_dot():
-    assert build_tray().read_client_state() == (None, "stopped")
+    assert build_tray().read_client_state() == (None, "Stopped")
 
 
 def test_a_config_error_wins_over_a_live_session():
     app = build_tray()
     make_running(app.server_controller, [("github", REGISTERED)])
     app.config_error = MagicMock(summary="line 1, column 8: Trailing comma before }.")
-    assert app.read_client_state() == ("error", "error: line 1, column 8: Trailing comma before }.")
+    assert app.read_client_state() == ("error", "Error: line 1, column 8: Trailing comma before }.")
 
 
 def test_a_run_that_ended_on_an_error_shows_it_until_the_next_start_or_stop():
     app = build_tray()
     app.server_controller.last_error = PLATFORM_ERROR
-    assert app.read_client_state() == ("error", f"error: {PLATFORM_ERROR}")
+    assert app.read_client_state() == ("error", f"Error: {PLATFORM_ERROR}")
 
 
 def test_a_daemon_run_is_shown_as_running_elsewhere():
     app = build_tray()
     app.server_controller.is_running, app.server_controller.daemon_mode = True, True
-    assert app.read_client_state() == ("connected", "running in a separate process")
+    assert app.read_client_state() == ("connected", "Running in a separate process")
 
 
 def test_a_run_asked_to_stop_is_no_longer_active_while_its_thread_cleans_up():
     app = build_tray()
     make_running(app.server_controller, [("github", REGISTERED)], ready=False)
     app.server_controller.stop_event.set()
-    assert app.read_client_state() == (None, "stopped")
+    assert app.read_client_state() == (None, "Stopped")
 
 
 @pytest.mark.parametrize("supervisor", [None, "previous run"])
@@ -84,13 +88,13 @@ def test_a_run_without_its_own_supervisor_yet_is_connecting(supervisor):
     app = build_tray()
     app.server_controller.is_running = True
     app.server_controller.supervisor = None if supervisor is None else MagicMock(cancelled=threading.Event(), link=MagicMock(ready=True))
-    assert app.read_client_state() == ("connecting", "connecting...")
+    assert app.read_client_state() == ("connecting", "Connecting…")
 
 
 def test_a_link_that_is_not_registered_is_connecting():
     app = build_tray()
     make_running(app.server_controller, [("github", REGISTERED)], ready=False)
-    assert app.read_client_state() == ("connecting", "connecting...")
+    assert app.read_client_state() == ("connecting", "Connecting…")
 
 
 def test_only_healthy_registered_servers_are_counted():
@@ -98,15 +102,15 @@ def test_only_healthy_registered_servers_are_counted():
     make_running(app.server_controller, [("github", REGISTERED), ("jira", DECLINED), ("slack", None)])
     app.server_controller.supervisor.registry.record_load(
         ServerLoad("broken", "stdio", failure=ServerFailure(COMMAND_NOT_FOUND, "not found", "Install it.")))
-    assert app.read_client_state() == ("connected", "connected (1 server)")
+    assert app.read_client_state() == ("connected", "Connected (1 server)")
     make_running(app.server_controller, [("github", REGISTERED), ("jira", REGISTERED)])
-    assert app.read_client_state() == ("connected", "connected (2 servers)")
+    assert app.read_client_state() == ("connected", "Connected (2 servers)")
 
 
 def test_a_session_with_no_registered_server_is_an_error():
     app = build_tray()
     make_running(app.server_controller, [("github", DECLINED)])
-    assert app.read_client_state() == ("error", "error: connected, but no server is available (see Servers menu)")
+    assert app.read_client_state() == ("error", "Error: No server is available (see Servers menu)")
 
 
 def test_the_status_text_keeps_only_the_host_of_a_url_that_carries_a_key_in_its_path():
@@ -121,44 +125,56 @@ def test_the_status_text_is_one_line():
 
 @pytest.mark.parametrize("error", ["x" * 300, "🚀" * 200, "server 😀 " * 40])
 def test_a_long_status_fits_the_windows_tooltip_with_its_prefix_and_suffix(error):
-    text = fit_status_text(PREFIX, f"error: {error}", " — update 0.2.0 available")
-    assert count_utf16_units(text) <= TOOLTIP_LIMIT
-    assert text.startswith(f"{PREFIX}error: ")
-    assert text.endswith("... — update 0.2.0 available")
+    text = fit_status_text(PREFIX, f"Error: {error}", UPDATE_LINE)
+    assert count_utf16_units(text) <= WINDOWS_TOOLTIP_UNITS
+    assert text.startswith(f"{PREFIX}Error: ")
+    assert text.endswith(f"...{UPDATE_LINE}")
 
 
 def test_a_short_status_is_kept_whole():
-    assert fit_status_text(PREFIX, "connected (3 servers)") == f"{PREFIX}connected (3 servers)"
+    assert fit_status_text(PREFIX, "Connected (3 servers)") == f"{PREFIX}Connected (3 servers)"
 
 
 def test_the_tooltip_names_an_update_only_when_the_tray_can_install_it():
-    assert build_tray(can_update=True).format_tooltip("stopped") == f"{PREFIX}stopped — update 0.2.0 available"
-    assert build_tray(can_update=False).format_tooltip("stopped") == f"{PREFIX}stopped"
+    assert build_tray(can_update=True).format_tooltip("Stopped") == f"{PREFIX}Stopped{UPDATE_LINE}"
+    assert build_tray(can_update=False).format_tooltip("Stopped") == f"{PREFIX}Stopped"
+
+
+def build_tray_on(tray_platform, can_update=False):
+    app = build_tray(can_update=can_update)
+    app.platform = tray_platform
+    return app
 
 
 def test_the_xorg_title_is_latin_1_so_python_xlib_can_write_it():
-    app = build_tray(can_update=True)
-    with patch.object(tray_module, "is_xorg_backend", return_value=True):
-        title = app.format_tooltip("error: server 😀 failed")
+    title = build_tray_on(XorgTray(), can_update=True).format_tooltip("Error: server 😀 failed…")
     title.encode("latin-1")
-    assert title == "ELITEA MCP Client - error: server ? failed - update 0.2.0 available"
+    assert title == "ELITEA MCP Client - Error: server ? failed... - Update 0.2.0 available"
 
 
-def test_other_backends_keep_the_unicode_title():
-    with patch.object(tray_module, "is_xorg_backend", return_value=False):
-        assert build_tray().format_tooltip("error: server 😀 failed") == f"{PREFIX}error: server 😀 failed"
+@pytest.mark.parametrize("tray_platform", [LinuxTray(), WindowsTray(), TrayPlatform()])
+def test_other_trays_keep_the_unicode_title(tray_platform):
+    assert build_tray_on(tray_platform).format_tooltip("Error: server 😀 failed…") == f"{PREFIX}Error: server 😀 failed…"
 
 
-@pytest.mark.parametrize("system, header", [("Windows", f"{PREFIX}error: R&&D server failed"), ("Darwin", f"{PREFIX}error: R&D server failed")])
-def test_the_menu_header_escapes_an_ampersand_only_where_windows_reads_it_as_a_shortcut(system, header):
-    with patch.object(tray_module.platform, "system", return_value=system):
-        assert build_tray().format_menu_header("error: R&D server failed") == header
+@pytest.mark.parametrize("tray_platform, header", [(WindowsTray(), "Error: R&&D server failed"),
+                                                   (LinuxTray(), "Error: R&D server failed")])
+def test_the_menu_header_escapes_an_ampersand_only_where_windows_reads_it_as_a_shortcut(tray_platform, header):
+    assert build_tray_on(tray_platform).format_menu_header("Error: R&D server failed") == header
+
+
+@pytest.mark.parametrize("backend, tray_class", [("pystray._win32", WindowsTray), ("pystray._appindicator", LinuxTray),
+                                                 ("pystray._gtk", LinuxTray), ("pystray._xorg", XorgTray),
+                                                 ("pystray._dummy", TrayPlatform)])
+def test_the_tray_platform_follows_the_backend_pystray_picked(backend, tray_class):
+    with patch.object(tray_platforms.pystray.Icon, "__module__", backend):
+        assert type(get_tray_platform()) is tray_class
 
 
 def test_the_menu_header_shows_the_state():
     app = build_tray()
     app.server_controller.last_error = PLATFORM_ERROR
-    assert app.get_menu_items()[0].text == f"{PREFIX}error: {PLATFORM_ERROR}"
+    assert app.get_menu_items()[0].text == f"Error: {PLATFORM_ERROR}"
 
 
 def test_a_redraw_sets_the_tooltip_and_the_dot():
@@ -167,7 +183,7 @@ def test_a_redraw_sets_the_tooltip_and_the_dot():
     app.create_icon_image = MagicMock()
     app.server_controller.last_error = PLATFORM_ERROR
     app.update_menu()
-    assert app.icon.title == f"{PREFIX}error: {PLATFORM_ERROR}"
+    assert app.icon.title == f"{PREFIX}Error: {PLATFORM_ERROR}"
     app.create_icon_image.assert_called_once_with("error")
 
 
@@ -200,12 +216,13 @@ def test_a_stopped_client_draws_no_dot_and_the_badge_only_for_an_installable_upd
     assert read_pixel(badged, badged.width - 8, 8) == UPDATE_BADGE_COLOR
 
 
+@pytest.mark.skipif(platform.system() != "Darwin", reason="the menu bar appearance exists only on macOS")
 @pytest.mark.parametrize("dark, shade", [(True, 255), (False, 0)])
 def test_the_macos_logo_follows_the_menu_bar(dark, shade):
-    app = build_tray()
-    app.menu_bar_is_dark = dark
-    with patch.object(tray_module.platform, "system", return_value="Darwin"):
-        image = app.create_icon_image("connected")
+    from src.elitea_mcp.tray_platforms.macos import MacOSTray
+    app = build_tray_on(MacOSTray())
+    app.platform.menu_bar_is_dark = dark
+    image = app.create_icon_image("connected")
     logo = {image.getpixel((x, y))[:3] for x in range(32) for y in range(32) if image.getpixel((x, y))[3]}
     assert logo == {(shade, shade, shade)}
     assert read_pixel(image, image.width - 12, image.height - 12) == STATUS_DOT_COLORS["connected"]
@@ -213,12 +230,12 @@ def test_the_macos_logo_follows_the_menu_bar(dark, shade):
 
 @pytest.mark.skipif(platform.system() != "Darwin", reason="the menu bar appearance exists only on macOS")
 def test_a_pystray_without_its_status_item_keeps_the_white_logo():
-    app = build_tray()
-    app.icon = object()
-    with patch.object(tray_module.AppKit, "NSOperationQueue") as queue:
-        app.watch_menu_bar_appearance()
+    from src.elitea_mcp.tray_platforms import macos
+    tray_platform = macos.MacOSTray()
+    with patch.object(macos.AppKit, "NSOperationQueue") as queue:
+        tray_platform.watch_appearance(object(), MagicMock())
     queue.mainQueue.assert_not_called()
-    assert app.menu_bar_is_dark is True
+    assert tray_platform.menu_bar_is_dark is True
 
 
 @pytest.fixture
@@ -251,7 +268,7 @@ def test_an_error_arriving_after_stop_is_notified_but_leaves_the_client_stopped(
         wait_until(lambda: not controller.server_thread.is_alive())
 
     notify_error.assert_called_once_with(PLATFORM_ERROR)
-    assert app.read_client_state() == (None, "stopped")
+    assert app.read_client_state() == (None, "Stopped")
 
 
 def test_an_error_arriving_while_stop_announces_itself_leaves_the_client_stopped(controller):
@@ -262,7 +279,7 @@ def test_an_error_arriving_while_stop_announces_itself_leaves_the_client_stopped
         time.sleep(0.1)
         controller.stop_servers()
         wait_until(lambda: not controller.server_thread.is_alive())
-    assert app.read_client_state() == (None, "stopped")
+    assert app.read_client_state() == (None, "Stopped")
 
 
 def test_an_error_that_ends_a_run_turns_the_client_red(controller):
@@ -270,7 +287,15 @@ def test_an_error_that_ends_a_run_turns_the_client_red(controller):
     with patch.object(controller_module, "validate_platform_config", side_effect=slow_preflight(0, PLATFORM_ERROR)):
         controller._start_embedded_servers()
         wait_until(lambda: not controller.server_thread.is_alive())
-    assert app.read_client_state() == ("error", f"error: {PLATFORM_ERROR}")
+    assert app.read_client_state() == ("error", f"Error: {PLATFORM_ERROR}")
+
+
+def test_an_unexpected_failure_reads_as_one_error_with_its_reason(controller):
+    app = build_tray(controller)
+    with patch.object(controller_module, "validate_platform_config", side_effect=RuntimeError("disk full")):
+        controller._start_embedded_servers()
+        wait_until(lambda: not controller.server_thread.is_alive())
+    assert app.read_client_state() == ("error", "Error: disk full")
 
 
 def test_a_start_clears_the_last_error_and_never_stores_the_skipped_servers_warning(controller):
@@ -295,7 +320,7 @@ def test_a_refused_start_is_red_in_the_only_redraw_it_triggers(controller):
     with patch.object(controller_module, "load_config", return_value={}), patch.object(controller_module, "check_config", return_value=report), \
             patch.object(controller_module, "write_config_schema"):
         assert controller.start_servers() is False
-    assert seen == [("error", "error: The config file has 1 problem.")]
+    assert seen == [("error", "Error: The config file has 1 problem.")]
 
 
 def register_every_server(config, registry, *callbacks):
@@ -311,7 +336,7 @@ def test_stopping_a_run_that_recorded_an_error_leaves_the_client_stopped(control
         wait_until(lambda: app.read_client_state()[0] == "connected")
         controller.supervisor.notify_error("Disconnected by the platform")
         controller.stop_servers()
-    assert app.read_client_state() == (None, "stopped")
+    assert app.read_client_state() == (None, "Stopped")
 
 
 @pytest.fixture
@@ -351,8 +376,8 @@ def states_after(seen, message):
 
 def test_live_first_connect_ends_connected(live):
     live.app.server_controller._start_embedded_servers()
-    wait_until(lambda: live.app.read_client_state() == ("connected", "connected (1 server)"))
-    assert live.seen[0] == ("Starting MCP servers...", ("connecting", "connecting..."))
+    wait_until(lambda: live.app.read_client_state() == ("connected", "Connected (1 server)"))
+    assert live.seen[0] == ("Starting MCP servers...", ("connecting", "Connecting…"))
 
 
 def test_live_a_dropped_connection_is_connecting_until_the_reregistration_is_confirmed(live):
@@ -362,8 +387,8 @@ def test_live_a_dropped_connection_is_connecting_until_the_reregistration_is_con
     live.restart_platform()
     wait_until(lambda: len(states_after(live.seen, "Connected to platform")) == 2)
 
-    assert states_after(live.seen, "Connection lost, reconnecting...") == [("connecting", "connecting...")]
-    assert states_after(live.seen, "Connected to platform")[-1] == ("connected", "connected (1 server)")
+    assert states_after(live.seen, "Connection lost, reconnecting...") == [("connecting", "Connecting…")]
+    assert states_after(live.seen, "Connected to platform")[-1] == ("connected", "Connected (1 server)")
 
 
 def test_live_a_kick_by_the_platform_ends_red_with_its_reason(live):
@@ -373,7 +398,7 @@ def test_live_a_kick_by_the_platform_ends_red_with_its_reason(live):
     live.server().disconnect(live.sids[0])
     wait_until(lambda: not live.app.server_controller.is_running)
 
-    assert live.app.read_client_state() == ("error", "error: Disconnected by the platform")
+    assert live.app.read_client_state() == ("error", "Error: Disconnected by the platform")
 
 
 def test_live_a_stop_never_passes_through_connecting(live):
@@ -383,5 +408,5 @@ def test_live_a_stop_never_passes_through_connecting(live):
 
     live.app.server_controller.stop_servers()
 
-    assert ("connecting", "connecting...") not in [state for _, state in live.seen[stop_index:]]
-    assert live.app.read_client_state() == (None, "stopped")
+    assert ("connecting", "Connecting…") not in [state for _, state in live.seen[stop_index:]]
+    assert live.app.read_client_state() == (None, "Stopped")

@@ -8,7 +8,6 @@ import json
 import os
 import sys
 import threading
-import subprocess
 import platform
 import multiprocessing
 import logging
@@ -31,34 +30,59 @@ if platform.system() == "Darwin":
 
 import pystray
 from PIL import Image, ImageDraw
+
 from .config_errors import ConfigError, ConfigMistake
 from .config import (SCHEMA_REFERENCE, get_bootstrap_config, set_bootstrap_config, interactive_bootstrap,
                      get_config_file, load_config, save_config)
 from .config_model import NOTIFICATION_LIMIT, check_config, write_config_schema
 from .utils.server_controller import get_server_controller
 from .utils.diagnostics import REPORT_FILE_NAME, TRAY_DIAGNOSTICS_HINT, DoctorContext, format_report, run_checks, summarize
-from .utils.server_registry import DECLINED, FAILED
+from .utils.server_loader import redact_urls
+from .utils.server_registry import DECLINED, FAILED, HEALTHY, REGISTERED
+from .tray_platforms import get_tray_platform
 from .main import main, find_default_log_file, get_default_paths, read_config_leniently
 from .utils.logging_setup import (DAEMON, DEBUG, INFO, OWNER_ONLY_FILE_MODE, TRAY, apply_debug_logging, is_debug_logging,
                                   register_log_secrets, restrict_to_owner, setup_logging)
 from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS, UpdateChecker, get_installed_version
 from .utils.self_update import consume_update_result, resolve_upgrade_plan, start_update_helper
 
+APP_NAME = "ELITEA MCP Client"
+STATUS_TEXT_LIMIT = 127
+ERROR = "error"
+CONNECTING = "connecting"
+CONNECTED = "connected"
 STATUS_DOT_COLORS = {
-    "config_error": (229, 57, 53, 255),
-    "running": (76, 175, 80, 255),
+    ERROR: (229, 57, 53, 255),
+    CONNECTING: (253, 216, 53, 255),
+    CONNECTED: (76, 175, 80, 255),
 }
+UPDATE_BADGE_COLOR = (255, 152, 0, 255)
 
-CLIPBOARD_COMMANDS = {
-    "darwin": [["pbcopy"]],
-    "windows": [["clip"]],
-    "linux": [["wl-copy"], ["xclip", "-selection", "clipboard"]],
-}
+
+def count_utf16_units(character):
+    return 2 if ord(character) > 0xFFFF else 1
+
+
+def fit_status_text(prefix, status, suffix=""):
+    """The status text every tray shows, in its tooltip and its menu: URLs reduced to their host, the status on one line, and the whole cut to the strictest tray limit, the Windows tooltip, which counts UTF-16 units and raises above it, so the text is the same on every platform."""
+    status = " ".join(redact_urls(status).split())
+    text = f"{prefix}{status}{suffix}"
+    if sum(map(count_utf16_units, text)) <= STATUS_TEXT_LIMIT:
+        return text
+    budget = STATUS_TEXT_LIMIT - sum(map(count_utf16_units, f"{prefix}...{suffix}"))
+    used = 0
+    for index, character in enumerate(status):
+        used += count_utf16_units(character)
+        if used > budget:
+            return f"{prefix}{status[:index]}...{suffix}"
+    return text
 
 
 class MCPTrayApp:
     def __init__(self, log_file=None):
         self.icon = None
+        self.platform = get_tray_platform()
+        self._redraw_lock = threading.Lock()
         self._log_file = Path(log_file) if log_file else None
         self.server_controller = get_server_controller()
         self.is_server_running = False
@@ -81,8 +105,8 @@ class MCPTrayApp:
         self.server_controller.set_server_callback(self.on_server_message)
         self.server_controller.set_servers_changed_callback(self.update_menu)
         
-    def create_icon_image(self):
-        """Create an icon for the system tray using the EliteA logo."""
+    def create_icon_image(self, dot=None):
+        """Create an icon for the system tray using the EliteA logo, with the state's dot and the update badge."""
         try:
             # Load the PNG logo using package resources (works when packaged)
             logo_data = self._load_icon_data()
@@ -100,62 +124,73 @@ class MCPTrayApp:
                 if image.mode != 'RGBA':
                     image = image.convert('RGBA')
                 
-                # For macOS, create a monochrome version for better tray integration
-                if platform.system().lower() == "darwin":
-                    # Create a monochrome version
-                    # Convert to grayscale first
-                    gray_image = image.convert('L')
-                    
-                    # Create a new RGBA image
-                    mono_image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
-                    
-                    # Apply the grayscale as an alpha mask to create white/transparent icon
-                    for x in range(64):
-                        for y in range(64):
-                            # Get the grayscale value
-                            gray_value = gray_image.getpixel((x, y))
-                            
-                            # Create white pixels where the logo is visible
-                            if gray_value > 50:  # Threshold to avoid very faint pixels
-                                # Use the grayscale value as alpha for smooth edges
-                                alpha = min(255, gray_value + 50)  # Boost contrast slightly
-                                mono_image.putpixel((x, y), (255, 255, 255, alpha))
-
-                    self._draw_status_dot(mono_image)
-                    return mono_image
-                else:
-                    # For other platforms, use the full-color logo
-                    self._draw_status_dot(image)
-                    return image
+                image = self.platform.prepare_logo(image)
+                self._draw_status_dot(image, dot)
+                return image
             else:
                 # Fallback: create a simple icon if logo file not found
                 icon = self._create_fallback_icon()
-                self._draw_status_dot(icon)
+                self._draw_status_dot(icon, dot)
                 return icon
                 
         except Exception as e:
             logger.warning(f"Could not load logo icon ({e}), using fallback")
             icon = self._create_fallback_icon()
-            self._draw_status_dot(icon)
+            self._draw_status_dot(icon, dot)
             return icon
     
-    def _draw_status_dot(self, image):
-        status = "config_error" if self.config_error else "running" if self.is_server_running else None
-        if status:
-            from PIL import ImageDraw
-            draw = ImageDraw.Draw(image)
-            dot_color = STATUS_DOT_COLORS[status]
+    def _draw_status_dot(self, image, dot):
+        draw = ImageDraw.Draw(image)
+        if dot:
             dot_radius = 12
-            margin = 0
-            x0 = image.width - dot_radius * 2 - margin
-            y0 = image.height - dot_radius * 2 - margin
-            x1 = image.width - margin
-            y1 = image.height - margin
-            draw.ellipse([x0, y0, x1, y1], fill=dot_color, outline=(255, 255, 255, 255), width=2)
+            x0 = image.width - dot_radius * 2
+            y0 = image.height - dot_radius * 2
+            draw.ellipse([x0, y0, image.width, image.height], fill=STATUS_DOT_COLORS[dot], outline=(255, 255, 255, 255), width=2)
+        if self.can_update():
+            badge_radius = 8
+            draw.ellipse([image.width - badge_radius * 2, 0, image.width, badge_radius * 2], fill=UPDATE_BADGE_COLOR)
+
+    def can_update(self):
+        return bool(self.update_checker and self.update_checker.state.can_update)
+
+    def read_client_state(self):
+        """The icon's dot and status text: the first rule that matches, from a config error down to a registered session."""
+        controller = self.server_controller
+        if self.config_error:
+            return ERROR, f"Error: {self.config_error.summary}"
+        if controller.is_running and controller.daemon_mode:
+            return CONNECTED, "Running in a separate process"
+        if not controller.is_running or controller.stop_event.is_set():
+            return (ERROR, f"Error: {controller.last_error}") if controller.last_error else (None, "Stopped")
+        supervisor = self.find_current_supervisor()
+        link = supervisor.link if supervisor else None
+        if link is None or not link.ready:
+            return CONNECTING, "Connecting…"
+        registered = [entry for entry in supervisor.registry.list_entries()
+                      if entry.status == HEALTHY and entry.registration == REGISTERED]
+        if not registered:
+            return ERROR, "Error: No server is available (see Servers menu)"
+        count = len(registered)
+        return CONNECTED, f"Connected ({count} server{'' if count == 1 else 's'})"
+
+    def find_current_supervisor(self):
+        """The running session's supervisor; until a new run builds its own, the controller still holds the last run's."""
+        controller = self.server_controller
+        supervisor = controller.supervisor
+        return supervisor if supervisor is not None and supervisor.cancelled is controller.stop_event else None
+
+    def format_tooltip(self, status):
+        """The app's name, the status and any update, one per line, as tray tooltips such as Dropbox's and OneDrive's read."""
+        update = f"\nUpdate {self.update_checker.state.latest} available" if self.can_update() else ""
+        return self.platform.format_title(fit_status_text(f"{APP_NAME}\n", status, update))
+
+    def format_menu_header(self, status):
+        """The status alone: the menu was opened from this app's icon, so it needs no name."""
+        return self.platform.format_menu_label(fit_status_text("", status))
     
     def _load_icon_data(self):
         """Load icon data using package resources (works when packaged)."""
-        icon_file_name = 'logo.png' if (platform.system().lower() == "windows") else 'logo64x64.png'
+        icon_file_name = self.platform.logo_file_name
         try:
             # Try modern importlib.resources first (Python 3.9+)
             try:
@@ -222,13 +257,20 @@ class MCPTrayApp:
 
     def get_menu_items(self):
         """Create the context menu for the tray icon, announcing a config error the moment it appears."""
+        menu_items, _, _, config_error_is_new = self.build_menu()
+        if config_error_is_new:
+            self.report_config_error()
+        return menu_items
+
+    def build_menu(self):
+        """The menu items, the dot and status they show, and whether this read of the config found a new error to announce."""
         previous_error = str(self.config_error) if self.config_error else None
         config = self._read_config()
-        if self.config_error and str(self.config_error) != previous_error:
-            self.report_config_error()
+        config_error_is_new = bool(self.config_error) and str(self.config_error) != previous_error
+        dot, status = self.read_client_state()
         
         menu_items = [
-            pystray.MenuItem("ELITEA MCP Client", lambda: None, enabled=False),
+            pystray.MenuItem(self.format_menu_header(status), lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
         ]
         problem_count = len(self.config_report.notable) if config is not None else 0
@@ -294,7 +336,7 @@ class MCPTrayApp:
             pystray.MenuItem("Quit", self.quit_app),
         ])
         
-        return menu_items
+        return menu_items, dot, status, config_error_is_new
 
     def build_servers_menu(self):
         """One row per server of the current or last run; a failed or declined row opens its error details."""
@@ -331,8 +373,8 @@ class MCPTrayApp:
             report = format_report(results)
             path = error_dir / REPORT_FILE_NAME
             path.write_text(report, encoding="utf-8")
-            copied = self._copy_to_clipboard(report)
-            self._open_file(path)
+            copied = self.platform.copy_to_clipboard(report)
+            self.platform.open_file(path)
             delivery = "Report opened and copied to the clipboard." if copied else f"Report opened: {path}"
             self.show_notification("Diagnostics", f"{summarize(results)} {delivery}")
         except Exception as error:
@@ -347,8 +389,7 @@ class MCPTrayApp:
         controller = self.server_controller
         if not controller.is_running or controller.daemon_mode:
             return None
-        supervisor = controller.supervisor
-        if supervisor is None or supervisor.cancelled is not controller.stop_event:
+        if self.find_current_supervisor() is None:
             return []
         return controller.list_servers()
 
@@ -363,7 +404,7 @@ class MCPTrayApp:
         except OSError as error:
             self.show_error("Server Details", f"Could not write {path}: {error}")
             return
-        self._open_file(path)
+        self.platform.open_file(path)
 
     def on_server_message(self, message):
         self.update_menu()
@@ -422,7 +463,7 @@ class MCPTrayApp:
         state = self.update_checker.state
         plan = resolve_upgrade_plan()
         if not plan.can_run:
-            clipboard_note = " (copied to clipboard)" if self._copy_to_clipboard(plan.display_command) else ""
+            clipboard_note = " (copied to clipboard)" if self.platform.copy_to_clipboard(plan.display_command) else ""
             self.show_notification("Update Manually", f"{plan.reason} Run: {plan.display_command}{clipboard_note}")
             return
         servers_were_running = self.is_server_running
@@ -452,16 +493,6 @@ class MCPTrayApp:
             self.show_notification("Update Complete", f"Updated to {result['installed']}.")
         if result["servers_were_running"]:
             self.start_server(daemon_mode=result["server_daemon_mode"])
-
-    def _copy_to_clipboard(self, text):
-        """Put text on the clipboard with the platform's own tool, reporting whether it worked."""
-        for command in CLIPBOARD_COMMANDS.get(platform.system().lower(), []):
-            try:
-                subprocess.run(command, input=text, text=True, check=True, timeout=5)
-                return True
-            except (OSError, subprocess.SubprocessError, UnicodeError):
-                continue
-        return False
 
     def on_server_status_change(self, status: str):
         """Handle server status changes."""
@@ -528,7 +559,7 @@ class MCPTrayApp:
             write_config_schema()
             logger.info(f"Created config file: {config_file}")
         
-        self._open_file(config_file)
+        self.platform.open_file(config_file)
         logger.info(f"Opening config file: {config_file}")
 
     @property
@@ -545,7 +576,7 @@ class MCPTrayApp:
             self.show_error("Open Log File", f"Could not open the log: {error}")
             return
         restrict_to_owner(log_file, OWNER_ONLY_FILE_MODE)
-        self._open_file(log_file)
+        self.platform.open_file(log_file)
 
     def open_logs_folder(self, icon=None, item=None):
         """Open the folder with the logs, the server error reports and the diagnostics report."""
@@ -555,7 +586,7 @@ class MCPTrayApp:
         except OSError as error:
             self.show_error("Open Logs Folder", f"Could not open the logs folder: {error}")
             return
-        self._open_file(folder)
+        self.platform.open_file(folder)
 
     def toggle_debug_logging(self, icon=None, item=None):
         """Switch debug logging for this tray at once and remember it as "log_level" for serve and run started later."""
@@ -577,35 +608,8 @@ class MCPTrayApp:
         # Ensure the config folder exists
         config_folder.mkdir(parents=True, exist_ok=True)
         
-        self._open_file(config_folder)
+        self.platform.open_file(config_folder)
         logger.info(f"Opening config folder: {config_folder}")
-
-    def _open_file(self, file_path):
-        """Open a file or folder using the system's default application."""
-        try:
-            system = platform.system().lower()
-            
-            if system == "darwin":  # macOS
-                # Create environment for subprocess to handle fork safety
-                env = os.environ.copy()
-                env['OBJC_DISABLE_INITIALIZE_FORK_SAFETY'] = 'YES'
-                
-                subprocess.run(
-                    ["open", str(file_path)], 
-                    check=True,
-                    env=env,
-                    start_new_session=True
-                )
-            elif system == "linux":
-                subprocess.run(["xdg-open", str(file_path)], check=True)
-            elif system == "windows":
-                os.startfile(str(file_path))
-            else:
-                logger.warning(f"Unsupported platform: {system}")
-                logger.info(f"Please manually open: {file_path}")
-        except Exception as e:
-            logger.error(f"Failed to open {file_path}: {e}")
-            logger.info(f"Please manually open: {file_path}")
 
     def bootstrap_config(self, icon=None, item=None):
         """Run the interactive bootstrap configuration in terminal."""
@@ -714,59 +718,19 @@ class MCPTrayApp:
     def show_notification(self, title, message):
         """Show notification using the system tray."""
         logger.info(f"{title}: {message}")
-        
-        # Use platform-specific notification system
-        if platform.system().lower() == "darwin":
-            self._show_macos_notification(title, message)
-        else:
-            # For other platforms, use pystray's built-in notification
-            if self.icon:
-                self.icon.notify(message, title)
-    
-    def _show_macos_notification(self, title, message):
-        """Show native macOS notification using osascript."""
-        try:
-            # Escape quotes and special characters for AppleScript
-            safe_title = title.replace('\\', '\\\\').replace('"', '\\"')
-            safe_message = message.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-            
-            # Use osascript to show native macOS notification
-            applescript = f'''
-            display notification "{safe_message}" with title "{safe_title}" sound name "default"
-            '''
-            
-            # Create environment for subprocess to handle fork safety
-            env = os.environ.copy()
-            env['OBJC_DISABLE_INITIALIZE_FORK_SAFETY'] = 'YES'
-            
-            subprocess.run(
-                ["osascript", "-e", applescript],
-                check=True,
-                env=env,
-                capture_output=True,
-                text=True,
-                start_new_session=True
-            )
-            
-        except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to show macOS notification via osascript: {e}")
-            # Fallback to pystray notification
-            if self.icon:
-                # For fallback, use single line message to avoid Script Editor issue
-                single_line_message = message.replace('\n', ' | ')
-                self.icon.notify(single_line_message, title)
-        except Exception as e:
-            logger.warning(f"Error showing macOS notification: {e}")
-            # Fallback to pystray notification
-            if self.icon:
-                single_line_message = message.replace('\n', ' | ')
-                self.icon.notify(single_line_message, title)
+        self.platform.notify(self.icon, title, message)
 
     def update_menu(self):
-        """Update the tray menu."""
-        if self.icon:
-            self.icon.menu = pystray.Menu(*self.get_menu_items())
-            self.icon.icon = self.create_icon_image()
+        """Redraw the menu, icon and tooltip one at a time, so the last redraw shows the latest state; announce outside the lock, as a notification can take a while."""
+        if not self.icon:
+            return
+        with self._redraw_lock:
+            menu_items, dot, status, config_error_is_new = self.build_menu()
+            self.icon.menu = pystray.Menu(*menu_items)
+            self.icon.icon = self.create_icon_image(dot)
+            self.icon.title = self.format_tooltip(status)
+        if config_error_is_new:
+            self.report_config_error()
 
     def quit_app(self, icon=None, item=None):
         """Quit the application."""
@@ -780,6 +744,7 @@ class MCPTrayApp:
     def _on_tray_ready(self, icon):
         """Show the icon, report a finished update and start the background update checks."""
         icon.visible = True
+        self.platform.watch_appearance(icon, self.update_menu)
         if self.config_error:
             self.report_config_error()
         self.report_update_result()
@@ -788,47 +753,21 @@ class MCPTrayApp:
 
     def run(self):
         """Start the tray application."""
-        # Hide from dock on macOS
-        self._hide_from_dock()
+        self.platform.prepare_app()
         
-        image = self.create_icon_image()
-        menu = pystray.Menu(*self.get_menu_items())
+        menu_items, dot, status, _ = self.build_menu()
         
         self.icon = pystray.Icon(
             "elitea_mcp",
-            image,
-            "Elitea MCP Client",
-            menu
+            self.create_icon_image(dot),
+            self.format_tooltip(status),
+            pystray.Menu(*menu_items)
         )
         
         logger.info("Starting EliteA MCP Client tray application...")
         logger.info("Right-click the tray icon for options")
         logger.info("Use 'Open Config File' to edit configuration")
         self.icon.run(setup=self._on_tray_ready)
-
-    def _hide_from_dock(self):
-        """Hide the application from the macOS dock."""
-        if platform.system().lower() == "darwin":
-            try:
-                # Import PyObjC modules for macOS
-                from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
-                
-                # Get the shared application instance
-                app = NSApplication.sharedApplication()
-                
-                # Set activation policy to accessory (no dock icon)
-                app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-                
-                logger.info("Successfully hidden from macOS dock")
-                
-            except ImportError:
-                logger.warning("PyObjC not available, cannot hide from dock")
-                logger.info("Install with: pip install pyobjc-framework-Cocoa")
-            except Exception as e:
-                logger.warning(f"Failed to hide from dock: {e}")
-        else:
-            # Not macOS, no action needed
-            pass
 
 
 def run_tray(log_file=None, daemon=False):

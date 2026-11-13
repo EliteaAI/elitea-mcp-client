@@ -47,6 +47,7 @@ class ServerController:
         self.supervisor: Optional[ServerSupervisor] = None
         self.server_callback: Optional[Callable[[str], None]] = None
         self.servers_changed_callback: Optional[Callable[[], None]] = None
+        self.last_error: Optional[str] = None
         
     def set_status_callback(self, callback: Callable[[str], None]):
         """Set callback for status updates."""
@@ -95,6 +96,11 @@ class ServerController:
         """Notify error."""
         if self.error_callback:
             self.error_callback(message)
+
+    def _record_error(self, message: str):
+        """Keep the error that ended a start or a run for the tray icon, before the notification redraws it."""
+        self.last_error = message
+        self._notify_error(message)
     
     def start_servers(self, daemon_mode: bool = False) -> bool:
         """Start MCP servers. Returns True if successful.
@@ -104,15 +110,16 @@ class ServerController:
         """
         if self.is_running:
             return True
+        self.last_error = None
             
         raw_config = load_config()
         report = check_config(raw_config)
         write_config_schema()
         if report.config is None:
-            self._notify_error(report.summary)
+            self._record_error(report.summary)
             return False
         if not report.config["servers"]:
-            self._notify_error(report.summarize_skipped_servers(len(report.skipped_servers)) if report.skipped_servers
+            self._record_error(report.summarize_skipped_servers(len(report.skipped_servers)) if report.skipped_servers
                                else "No servers configured. Please bootstrap servers first.")
             return False
         if report.skipped_servers:
@@ -197,17 +204,21 @@ class ServerController:
                 # Process failed to start
                 stdout, stderr = self.server_process.communicate()
                 error_msg = stderr.decode() if stderr else "Unknown error"
-                self._notify_error(f"Failed to start daemon servers: {error_msg}")
+                self._record_error(f"Failed to start daemon servers: {error_msg}")
                 return False
                 
         except Exception as e:
-            self._notify_error(f"Error starting daemon servers: {str(e)}")
+            self._record_error(f"Error starting daemon servers: {str(e)}")
             return False
     
     def _start_embedded_servers(self) -> bool:
         """Start MCP servers in the current process (embedded mode)."""
         stop_event = threading.Event()
         failed = threading.Event()
+
+        def report_error(message):
+            """An error after Stop is still notified but never turns the stopped icon red."""
+            (self._notify_error if stop_event.is_set() else self._record_error)(message)
 
         def run_server_loop():
             supervisor = None
@@ -216,7 +227,7 @@ class ServerController:
                 self._notify_status("Starting MCP servers...")
                 
                 config = validate_platform_config(self.config, self._notify_status)
-                supervisor = ServerSupervisor(config, self.skipped_servers, self._notify_status, self._notify_error,
+                supervisor = ServerSupervisor(config, self.skipped_servers, self._notify_status, report_error,
                                               self._notify_server, self._notify_servers_changed,
                                               summary_suffix="See Servers menu.", cancelled=stop_event,
                                               on_session_ended=failed.set)
@@ -231,10 +242,10 @@ class ServerController:
 
             except (PreflightError, PlatformConnectionError) as error:
                 failed.set()
-                self._notify_error(str(error))
+                report_error(str(error))
             except Exception as e:
                 failed.set()
-                self._notify_error(f"Server error: {str(e)}")
+                report_error(str(e))
             finally:
                 if supervisor is not None:
                     supervisor.stop()
@@ -295,6 +306,7 @@ class ServerController:
                 # Give it a few seconds to stop gracefully
                 self.server_thread.join(timeout=MONITOR_DELAY)
             
+        self.last_error = None
         self.is_running = False
         self.daemon_mode = False
         self._notify_status("MCP servers stopped")

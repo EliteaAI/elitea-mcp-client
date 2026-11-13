@@ -412,8 +412,9 @@ def test_validate_config_reports_problems_that_do_not_stop_the_client(config_fil
 
 def test_open_config_file_creates_a_file_that_references_the_schema(config_file):
     app = build_tray()
-    app._open_file = MagicMock()
+    app.platform.open_file = MagicMock()
     app.open_config_file()
+    app.platform.open_file.assert_called_once_with(config_file)
     assert json.loads(config_file.read_text()) == {"$schema": SCHEMA_REFERENCE}
     assert (config_file.parent / "config.schema.json").exists()
 

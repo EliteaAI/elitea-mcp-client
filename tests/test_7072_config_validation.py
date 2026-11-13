@@ -239,10 +239,11 @@ def test_a_running_server_can_still_be_stopped_while_the_config_is_broken(config
     assert "Restart MCP Server" not in texts
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS notifications need AppKit")
 def test_macos_notifications_escape_backslashes_and_quotes_for_applescript():
-    app = build_tray()
-    with patch.object(tray_module.subprocess, "run") as run:
-        tray_module.MCPTrayApp._show_macos_notification(app, "Invalid Config", f"Expecting ',' delimiter. {ConfigMistake.BACKSLASH.hint}")
+    from src.elitea_mcp.tray_platforms import macos
+    with patch.object(macos.subprocess, "run") as run:
+        macos.MacOSTray().notify(None, "Invalid Config", f"Expecting ',' delimiter. {ConfigMistake.BACKSLASH.hint}")
     script = run.call_args.args[0][2]
     assert ('display notification "Expecting \',\' delimiter. Backslashes in Windows paths must be doubled '
             '(\\"C:\\\\\\\\Users\\\\\\\\...\\") or use forward slashes (\\"C:/Users/...\\")."') in script

@@ -12,6 +12,7 @@ import requests
 
 from src.elitea_mcp import main as main_module
 from src.elitea_mcp import tray as tray_module
+from src.elitea_mcp.tray_platforms import base as tray_platform_base
 from src.elitea_mcp.utils import client_identity, diagnostics, preflight, session_status
 from src.elitea_mcp.utils.diagnostics import (CheckResult, DoctorContext, Status, exit_code, fail, format_report,
                                               ok, run_checks, warn)
@@ -694,8 +695,8 @@ def app(tmp_path):
     with patch.object(tray_module, "get_server_controller", return_value=controller), \
             patch.object(tray_module, "UpdateChecker"), patch.object(tray_module.MCPTrayApp, "_read_config", return_value=None):
         app = tray_module.MCPTrayApp()
-    app._open_file = MagicMock()
-    app._copy_to_clipboard = MagicMock(return_value=True)
+    app.platform.open_file = MagicMock()
+    app.platform.copy_to_clipboard = MagicMock(return_value=True)
     app.show_notification = MagicMock()
     app.show_error = MagicMock()
     return app
@@ -717,8 +718,8 @@ def test_run_diagnostics_saves_opens_and_copies_the_report_off_the_menu_thread(a
 
     report_path = tmp_path / diagnostics.REPORT_FILE_NAME
     assert report_path.read_text() == format_report(results)
-    app._open_file.assert_called_once_with(report_path)
-    app._copy_to_clipboard.assert_called_once_with(format_report(results))
+    app.platform.open_file.assert_called_once_with(report_path)
+    app.platform.copy_to_clipboard.assert_called_once_with(format_report(results))
     app.show_notification.assert_called_with("Diagnostics", "1 problem. Report opened and copied to the clipboard.")
     assert [entry.name for entry in run.call_args.args[0].list_local_session()] == ["jira", "github", "figma"]
 
@@ -774,14 +775,14 @@ def test_serve_points_to_doctor_when_the_platform_refuses_the_settings(capsys):
 
 
 def test_a_clipboard_tool_that_cannot_take_the_marks_still_opens_the_report(app, tmp_path):
-    app._copy_to_clipboard = tray_module.MCPTrayApp._copy_to_clipboard.__get__(app)
+    app.platform.copy_to_clipboard = type(app.platform).copy_to_clipboard.__get__(app.platform)
     encode_error = UnicodeEncodeError("charmap", "✓", 0, 1, "character maps to <undefined>")
     with patch.object(tray_module, "run_checks", return_value=[ok("Config JSON valid")]), \
             patch.object(tray_module, "get_default_paths", return_value={"tray_log": tmp_path / "tray.log"}), \
-            patch.object(tray_module.subprocess, "run", side_effect=encode_error):
+            patch.object(tray_platform_base.subprocess, "run", side_effect=encode_error):
         app.write_diagnostics_report()
 
-    app._open_file.assert_called_once_with(tmp_path / diagnostics.REPORT_FILE_NAME)
+    app.platform.open_file.assert_called_once_with(tmp_path / diagnostics.REPORT_FILE_NAME)
     app.show_error.assert_not_called()
     assert app.show_notification.call_args.args[1].startswith("All checks passed. Report opened: ")
 

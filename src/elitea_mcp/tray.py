@@ -31,23 +31,36 @@ if platform.system() == "Darwin":
 
 import pystray
 from PIL import Image, ImageDraw
+
+if platform.system() == "Darwin":
+    import AppKit
+    import objc
+    from Foundation import NSObject
 from .config_errors import ConfigError, ConfigMistake
 from .config import (SCHEMA_REFERENCE, get_bootstrap_config, set_bootstrap_config, interactive_bootstrap,
                      get_config_file, load_config, save_config)
 from .config_model import NOTIFICATION_LIMIT, check_config, write_config_schema
 from .utils.server_controller import get_server_controller
 from .utils.diagnostics import REPORT_FILE_NAME, TRAY_DIAGNOSTICS_HINT, DoctorContext, format_report, run_checks, summarize
-from .utils.server_registry import DECLINED, FAILED
+from .utils.server_loader import redact_urls
+from .utils.server_registry import DECLINED, FAILED, HEALTHY, REGISTERED
 from .main import main, find_default_log_file, get_default_paths, read_config_leniently
 from .utils.logging_setup import (DAEMON, DEBUG, INFO, OWNER_ONLY_FILE_MODE, TRAY, apply_debug_logging, is_debug_logging,
                                   register_log_secrets, restrict_to_owner, setup_logging)
 from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS, UpdateChecker, get_installed_version
 from .utils.self_update import consume_update_result, resolve_upgrade_plan, start_update_helper
 
+APP_NAME = "ELITEA MCP Client"
+TOOLTIP_LIMIT = 127
+ERROR = "error"
+CONNECTING = "connecting"
+CONNECTED = "connected"
 STATUS_DOT_COLORS = {
-    "config_error": (229, 57, 53, 255),
-    "running": (76, 175, 80, 255),
+    ERROR: (229, 57, 53, 255),
+    CONNECTING: (253, 216, 53, 255),
+    CONNECTED: (76, 175, 80, 255),
 }
+UPDATE_BADGE_COLOR = (255, 152, 0, 255)
 
 CLIPBOARD_COMMANDS = {
     "darwin": [["pbcopy"]],
@@ -56,9 +69,67 @@ CLIPBOARD_COMMANDS = {
 }
 
 
+def define_appearance_observer():
+    """An Objective-C class can be defined only once per process, and this module may be imported under two names."""
+    try:
+        return objc.lookUpClass("MenuBarAppearanceObserver")
+    except objc.nosuchclass_error:
+        class MenuBarAppearanceObserver(NSObject):
+            """Calls on_change with the status bar button whenever its appearance changes, on the main thread."""
+
+            def observeValueForKeyPath_ofObject_change_context_(self, key_path, button, change, context):
+                self.on_change(button)
+
+        return MenuBarAppearanceObserver
+
+
+if platform.system() == "Darwin":
+    MENU_BAR_APPEARANCES = [AppKit.NSAppearanceNameAqua, AppKit.NSAppearanceNameDarkAqua]
+    MenuBarAppearanceObserver = define_appearance_observer()
+
+
+def is_dark_appearance(appearance):
+    return appearance.bestMatchFromAppearancesWithNames_(MENU_BAR_APPEARANCES) == AppKit.NSAppearanceNameDarkAqua
+
+
+def count_utf16_units(character):
+    return 2 if ord(character) > 0xFFFF else 1
+
+
+def fit_status_text(prefix, status, suffix=""):
+    """One line with URLs reduced to their host, within the Windows tooltip limit, which counts UTF-16 units and raises above it."""
+    status = " ".join(redact_urls(status).split())
+    text = f"{prefix}{status}{suffix}"
+    if sum(map(count_utf16_units, text)) <= TOOLTIP_LIMIT:
+        return text
+    budget = TOOLTIP_LIMIT - sum(map(count_utf16_units, f"{prefix}...{suffix}"))
+    used = 0
+    for index, character in enumerate(status):
+        used += count_utf16_units(character)
+        if used > budget:
+            return f"{prefix}{status[:index]}...{suffix}"
+    return text
+
+
+def is_xorg_backend():
+    return pystray.Icon.__module__.endswith("_xorg")
+
+
+def encode_for_xorg_title(text):
+    """python-xlib writes the window title as Latin-1 and raises on anything else, so a dash or emoji would stop the tray."""
+    return text.replace("—", "-").encode("latin-1", "replace").decode("latin-1")
+
+
+def describe_server_count(count):
+    return f"{count} server{'' if count == 1 else 's'}"
+
+
 class MCPTrayApp:
     def __init__(self, log_file=None):
         self.icon = None
+        self._redraw_lock = threading.Lock()
+        self.menu_bar_is_dark = True
+        self._appearance_observer = None
         self._log_file = Path(log_file) if log_file else None
         self.server_controller = get_server_controller()
         self.is_server_running = False
@@ -81,8 +152,8 @@ class MCPTrayApp:
         self.server_controller.set_server_callback(self.on_server_message)
         self.server_controller.set_servers_changed_callback(self.update_menu)
         
-    def create_icon_image(self):
-        """Create an icon for the system tray using the EliteA logo."""
+    def create_icon_image(self, dot=None):
+        """Create an icon for the system tray using the EliteA logo, with the state's dot and the update badge."""
         try:
             # Load the PNG logo using package resources (works when packaged)
             logo_data = self._load_icon_data()
@@ -109,7 +180,8 @@ class MCPTrayApp:
                     # Create a new RGBA image
                     mono_image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
                     
-                    # Apply the grayscale as an alpha mask to create white/transparent icon
+                    # Apply the grayscale as an alpha mask, in the shade the menu bar's appearance needs
+                    shade = 255 if self.menu_bar_is_dark else 0
                     for x in range(64):
                         for y in range(64):
                             # Get the grayscale value
@@ -119,39 +191,73 @@ class MCPTrayApp:
                             if gray_value > 50:  # Threshold to avoid very faint pixels
                                 # Use the grayscale value as alpha for smooth edges
                                 alpha = min(255, gray_value + 50)  # Boost contrast slightly
-                                mono_image.putpixel((x, y), (255, 255, 255, alpha))
+                                mono_image.putpixel((x, y), (shade, shade, shade, alpha))
 
-                    self._draw_status_dot(mono_image)
+                    self._draw_status_dot(mono_image, dot)
                     return mono_image
                 else:
                     # For other platforms, use the full-color logo
-                    self._draw_status_dot(image)
+                    self._draw_status_dot(image, dot)
                     return image
             else:
                 # Fallback: create a simple icon if logo file not found
                 icon = self._create_fallback_icon()
-                self._draw_status_dot(icon)
+                self._draw_status_dot(icon, dot)
                 return icon
                 
         except Exception as e:
             logger.warning(f"Could not load logo icon ({e}), using fallback")
             icon = self._create_fallback_icon()
-            self._draw_status_dot(icon)
+            self._draw_status_dot(icon, dot)
             return icon
     
-    def _draw_status_dot(self, image):
-        status = "config_error" if self.config_error else "running" if self.is_server_running else None
-        if status:
-            from PIL import ImageDraw
-            draw = ImageDraw.Draw(image)
-            dot_color = STATUS_DOT_COLORS[status]
+    def _draw_status_dot(self, image, dot):
+        draw = ImageDraw.Draw(image)
+        if dot:
             dot_radius = 12
-            margin = 0
-            x0 = image.width - dot_radius * 2 - margin
-            y0 = image.height - dot_radius * 2 - margin
-            x1 = image.width - margin
-            y1 = image.height - margin
-            draw.ellipse([x0, y0, x1, y1], fill=dot_color, outline=(255, 255, 255, 255), width=2)
+            x0 = image.width - dot_radius * 2
+            y0 = image.height - dot_radius * 2
+            draw.ellipse([x0, y0, image.width, image.height], fill=STATUS_DOT_COLORS[dot], outline=(255, 255, 255, 255), width=2)
+        if self.can_update():
+            badge_radius = 8
+            draw.ellipse([image.width - badge_radius * 2, 0, image.width, badge_radius * 2], fill=UPDATE_BADGE_COLOR)
+
+    def can_update(self):
+        return bool(self.update_checker and self.update_checker.state.can_update)
+
+    def read_client_state(self):
+        """The icon's dot and status text: the first rule that matches, from a config error down to a registered session."""
+        controller = self.server_controller
+        if self.config_error:
+            return ERROR, f"error: {self.config_error.summary}"
+        if controller.is_running and controller.daemon_mode:
+            return CONNECTED, "running in a separate process"
+        if not controller.is_running or controller.stop_event.is_set():
+            return (ERROR, f"error: {controller.last_error}") if controller.last_error else (None, "stopped")
+        supervisor = self.find_current_supervisor()
+        link = supervisor.link if supervisor else None
+        if link is None or not link.ready:
+            return CONNECTING, "connecting..."
+        registered = [entry for entry in supervisor.registry.list_entries()
+                      if entry.status == HEALTHY and entry.registration == REGISTERED]
+        if not registered:
+            return ERROR, "error: connected, but no server is available (see Servers menu)"
+        return CONNECTED, f"connected ({describe_server_count(len(registered))})"
+
+    def find_current_supervisor(self):
+        """The running session's supervisor; until a new run builds its own, the controller still holds the last run's."""
+        controller = self.server_controller
+        supervisor = controller.supervisor
+        return supervisor if supervisor is not None and supervisor.cancelled is controller.stop_event else None
+
+    def format_tooltip(self, status):
+        suffix = f" — update {self.update_checker.state.latest} available" if self.can_update() else ""
+        tooltip = fit_status_text(f"{APP_NAME} — ", status, suffix)
+        return encode_for_xorg_title(tooltip) if is_xorg_backend() else tooltip
+
+    def format_menu_header(self, status):
+        header = fit_status_text(f"{APP_NAME} — ", status)
+        return header.replace("&", "&&") if platform.system() == "Windows" else header
     
     def _load_icon_data(self):
         """Load icon data using package resources (works when packaged)."""
@@ -222,13 +328,20 @@ class MCPTrayApp:
 
     def get_menu_items(self):
         """Create the context menu for the tray icon, announcing a config error the moment it appears."""
+        menu_items, _, _, config_error_is_new = self.build_menu()
+        if config_error_is_new:
+            self.report_config_error()
+        return menu_items
+
+    def build_menu(self):
+        """The menu items, the dot and status they show, and whether this read of the config found a new error to announce."""
         previous_error = str(self.config_error) if self.config_error else None
         config = self._read_config()
-        if self.config_error and str(self.config_error) != previous_error:
-            self.report_config_error()
+        config_error_is_new = bool(self.config_error) and str(self.config_error) != previous_error
+        dot, status = self.read_client_state()
         
         menu_items = [
-            pystray.MenuItem("ELITEA MCP Client", lambda: None, enabled=False),
+            pystray.MenuItem(self.format_menu_header(status), lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
         ]
         problem_count = len(self.config_report.notable) if config is not None else 0
@@ -294,7 +407,7 @@ class MCPTrayApp:
             pystray.MenuItem("Quit", self.quit_app),
         ])
         
-        return menu_items
+        return menu_items, dot, status, config_error_is_new
 
     def build_servers_menu(self):
         """One row per server of the current or last run; a failed or declined row opens its error details."""
@@ -347,8 +460,7 @@ class MCPTrayApp:
         controller = self.server_controller
         if not controller.is_running or controller.daemon_mode:
             return None
-        supervisor = controller.supervisor
-        if supervisor is None or supervisor.cancelled is not controller.stop_event:
+        if self.find_current_supervisor() is None:
             return []
         return controller.list_servers()
 
@@ -763,10 +875,16 @@ class MCPTrayApp:
                 self.icon.notify(single_line_message, title)
 
     def update_menu(self):
-        """Update the tray menu."""
-        if self.icon:
-            self.icon.menu = pystray.Menu(*self.get_menu_items())
-            self.icon.icon = self.create_icon_image()
+        """Redraw the menu, icon and tooltip one at a time, so the last redraw shows the latest state; announce outside the lock, as a notification can take a while."""
+        if not self.icon:
+            return
+        with self._redraw_lock:
+            menu_items, dot, status, config_error_is_new = self.build_menu()
+            self.icon.menu = pystray.Menu(*menu_items)
+            self.icon.icon = self.create_icon_image(dot)
+            self.icon.title = self.format_tooltip(status)
+        if config_error_is_new:
+            self.report_config_error()
 
     def quit_app(self, icon=None, item=None):
         """Quit the application."""
@@ -780,6 +898,8 @@ class MCPTrayApp:
     def _on_tray_ready(self, icon):
         """Show the icon, report a finished update and start the background update checks."""
         icon.visible = True
+        if platform.system() == "Darwin":
+            self.watch_menu_bar_appearance()
         if self.config_error:
             self.report_config_error()
         self.report_update_result()
@@ -791,20 +911,36 @@ class MCPTrayApp:
         # Hide from dock on macOS
         self._hide_from_dock()
         
-        image = self.create_icon_image()
-        menu = pystray.Menu(*self.get_menu_items())
+        menu_items, dot, status, _ = self.build_menu()
         
         self.icon = pystray.Icon(
             "elitea_mcp",
-            image,
-            "Elitea MCP Client",
-            menu
+            self.create_icon_image(dot),
+            self.format_tooltip(status),
+            pystray.Menu(*menu_items)
         )
         
         logger.info("Starting EliteA MCP Client tray application...")
         logger.info("Right-click the tray icon for options")
         logger.info("Use 'Open Config File' to edit configuration")
         self.icon.run(setup=self._on_tray_ready)
+
+    def watch_menu_bar_appearance(self):
+        """Follow the menu bar's light or dark look, which tracks the wallpaper as well as the system setting; pystray exposes no hook, so read its status item, keeping today's white logo if it is gone."""
+        status_item = getattr(self.icon, "_status_item", None)
+        if status_item is None:
+            return
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(lambda: self.observe_menu_bar(status_item.button()))
+
+    def observe_menu_bar(self, button):
+        self._appearance_observer = MenuBarAppearanceObserver.alloc().init()
+        self._appearance_observer.on_change = self.on_menu_bar_appearance_change
+        button.addObserver_forKeyPath_options_context_(self._appearance_observer, "effectiveAppearance",
+                                                       AppKit.NSKeyValueObservingOptionInitial, None)
+
+    def on_menu_bar_appearance_change(self, button):
+        self.menu_bar_is_dark = is_dark_appearance(button.effectiveAppearance())
+        self.update_menu()
 
     def _hide_from_dock(self):
         """Hide the application from the macOS dock."""

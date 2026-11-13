@@ -148,6 +148,7 @@ class PlatformLink:
         self.client_id = load_client_id()
         self.platform_protocol = None
         self.registered = False
+        self.ready = False
         self._state_lock = threading.Lock()
         self._sending = False
         self._dirty = False
@@ -179,6 +180,7 @@ class PlatformLink:
             self.sio.disconnect()
             raise
         self.registered = True
+        self.ready = True
         logger.info("Connected to platform")
         self.notify_status("Connected to platform")
         threading.Thread(target=self.sio.wait, daemon=True).start()
@@ -307,6 +309,7 @@ class PlatformLink:
     def announce_connected(self):
         self._update_failing = False
         if self._reregistering:
+            self.ready = True
             self._reregistering = False
             logger.info("Connected to platform")
             self.notify_status("Connected to platform")
@@ -318,6 +321,7 @@ class PlatformLink:
             self.sio.start_background_task(self.sync)
 
     def on_disconnect(self, reason):
+        self.ready = False
         if reason == self.sio.reason.CLIENT_DISCONNECT:
             logger.info("Disconnected from platform")
             self.notify_status("Disconnected from platform")

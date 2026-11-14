@@ -1,7 +1,7 @@
 import re
 import shlex
 
-from ..config import get_config_file, save_config, load_config
+from ..config import get_config_file, update_config
 from ..utils.name import sanitize
 
 
@@ -11,14 +11,16 @@ def bootstrap_servers(config):
     if not project_id:
         return
     #
-    config = load_config()
-    config["project_id"] = project_id
-    #
-    if not config.get("servers") and isinstance(config.get("mcpServers"), dict):
-        config["servers"] = config.pop("mcpServers")
-    config["servers"] = {**_read_existing_servers(config), **_servers_flow()}
-    #
-    save_config(config)
+    servers = _servers_flow()
+
+    def apply(config):
+        config["project_id"] = project_id
+        if not config.get("servers") and isinstance(config.get("mcpServers"), dict):
+            config["servers"] = config.pop("mcpServers")
+        config["servers"] = {**_read_existing_servers(config), **servers}
+        return True
+
+    update_config(apply, "The servers")
     print(f"Servers saved to {get_config_file()}")
 
 

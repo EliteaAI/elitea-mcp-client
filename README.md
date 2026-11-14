@@ -22,7 +22,7 @@ A powerful and user-friendly MCP (Model Context Protocol) client with both comma
 | Feature | CLI Mode | Tray Mode | Daemon Mode |
 |---------|----------|-----------|-------------|
 | Server Management | ✅ Manual | ✅ GUI Controls | ✅ Background |
-| Configuration | ✅ Bootstrap CMD | ✅ File/Wizard | ✅ File-based |
+| Configuration | ✅ Bootstrap CMD | ✅ File/Settings window | ✅ File-based |
 | User Interface | 💻 Terminal | 🖥️ System Tray | 🔄 Background |
 | Auto-start | ❌ Manual | ✅ OS Integration | ✅ Service Mode |
 | Resource Usage | 💾 On-demand | 💾 Minimal | 💾 Continuous |
@@ -168,7 +168,7 @@ The system tray application provides an intuitive GUI for managing your MCP clie
 ### Features
 
 - **🖥️ System Tray Integration** - Minimalist icon in your system tray
-- **📁 Configuration Management** - Open config files, run bootstrap wizard
+- **📁 Configuration Management** - Open config files, set the connection in the Settings window
 - **🔄 Server Control** - Start/stop MCP servers with different modes
 - **📊 Real-time Status** - Visual feedback for server operations
 - **🌍 Cross-Platform** - Windows, macOS, and Linux support
@@ -233,7 +233,7 @@ After a start, a notification summarises the result, for example `3 of 4 MCP ser
 - **Open Config File** - Edit JSON configuration in default text editor
 - **Validate Config** - Re-check the config file: a JSON error is reported with its line, column and fix hint, and every other problem with its path (for example `servers.github.args`) and what to change. While a problem stops the client the tray stays up with only the config tools, then Start returns once it validates. A server whose config cannot work is skipped at Start and the others run
 - **Open Config Folder** - Open configuration directory in file manager
-- **Bootstrap (Terminal)** - Run interactive configuration setup
+- **Settings…** - Set the deployment URL, token and project ID in a small window, test the connection and save. It needs Tk; without it, the tray shows how to install Tk and opens config.json instead
 - **View Current Config** - Display current settings via system notification
 
 #### Updates

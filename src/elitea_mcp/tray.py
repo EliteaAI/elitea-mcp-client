@@ -4,8 +4,8 @@ System tray application for EliteA MCP Client.
 Provides easy access to configuration and server management.
 """
 import functools
-import json
 import os
+import subprocess
 import sys
 import threading
 import platform
@@ -31,9 +31,8 @@ if platform.system() == "Darwin":
 import pystray
 from PIL import Image, ImageDraw
 
-from .config_errors import ConfigError, ConfigMistake
-from .config import (SCHEMA_REFERENCE, get_bootstrap_config, set_bootstrap_config, interactive_bootstrap,
-                     get_config_file, load_config, save_config)
+from .config_errors import ConfigError
+from .config import get_bootstrap_config, get_config_file, has_duplicate_keys, load_config, update_config
 from .config_model import NOTIFICATION_LIMIT, check_config, write_config_schema
 from .utils.server_controller import get_server_controller
 from .utils.diagnostics import REPORT_FILE_NAME, TRAY_DIAGNOSTICS_HINT, DoctorContext, format_report, run_checks, summarize
@@ -41,6 +40,7 @@ from .utils.server_loader import redact_urls
 from .utils.server_registry import DECLINED, FAILED, HEALTHY, REGISTERED
 from .tray_platforms import get_tray_platform
 from .main import main, find_default_log_file, get_default_paths, read_config_leniently
+from .settings_form import SettingsExit, describe_tk_install
 from .utils.logging_setup import (DAEMON, DEBUG, INFO, OWNER_ONLY_FILE_MODE, TRAY, apply_debug_logging, is_debug_logging,
                                   register_log_secrets, restrict_to_owner, setup_logging)
 from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS, UpdateChecker, get_installed_version
@@ -83,6 +83,7 @@ class MCPTrayApp:
         self.icon = None
         self.platform = get_tray_platform()
         self._redraw_lock = threading.Lock()
+        self._redraw_requested = threading.Lock()
         self._log_file = Path(log_file) if log_file else None
         self.server_controller = get_server_controller()
         self.is_server_running = False
@@ -90,6 +91,7 @@ class MCPTrayApp:
         self.config_report = None
         self.settings = None
         self.diagnostics_running = False
+        self.settings_running = False
         self.has_duplicate_keys = False
         self._read_config()
         config = self.settings
@@ -306,7 +308,7 @@ class MCPTrayApp:
                 pystray.MenuItem("Open Config File", self.open_config_file),
                 pystray.MenuItem("Validate Config", self.validate_config),
                 pystray.MenuItem("Open Config Folder", self.open_config_folder),
-                pystray.MenuItem("Bootstrap (Terminal)", self.bootstrap_config),
+                pystray.MenuItem("Settings…", self.open_settings),
                 pystray.MenuItem("View Current Config", self.view_config),
             )),
             pystray.Menu.SEPARATOR
@@ -523,7 +525,7 @@ class MCPTrayApp:
             return
         if not config.get('deployment_url') or not config.get('auth_token'):
             self.show_error("Configuration Required", 
-                          "Please configure the client first using Bootstrap.")
+                          "Please configure the client first using Configuration → Settings….")
             return
             
         # Use the server controller to start servers
@@ -551,13 +553,11 @@ class MCPTrayApp:
         """Open the configuration file in the default text editor."""
         config_file = get_config_file()
         
-        # Ensure the config file exists
         if not config_file.exists():
-            # Create an empty config file
-            config_file.parent.mkdir(parents=True, exist_ok=True)
-            config_file.write_text(json.dumps({"$schema": SCHEMA_REFERENCE}, indent=2))
+            update_config(lambda raw: False, "The new config file")
             write_config_schema()
             logger.info(f"Created config file: {config_file}")
+        restrict_to_owner(config_file, OWNER_ONLY_FILE_MODE)
         
         self.platform.open_file(config_file)
         logger.info(f"Opening config file: {config_file}")
@@ -611,22 +611,66 @@ class MCPTrayApp:
         self.platform.open_file(config_folder)
         logger.info(f"Opening config folder: {config_folder}")
 
-    def bootstrap_config(self, icon=None, item=None):
-        """Run the interactive bootstrap configuration in terminal."""
-        logger.info("\n" + "="*50)
-        logger.info("Running Bootstrap Configuration...")
-        logger.info("="*50)
-        
-        try:
-            # Run bootstrap in the current process
-            config = interactive_bootstrap()
-            logger.info("Configuration updated successfully!")
+    def open_settings(self, icon=None, item=None):
+        """Open the Settings window in its own process and return at once; a file that cannot be parsed is shown and opened instead, since the window could not read it either."""
+        if self.settings_running:
+            self.show_notification("Settings", f"Settings is already open; find it {self.platform.open_window_hint}.")
+            return
+        self._read_config()
+        if isinstance(self.config_error, ConfigError):
+            self.report_config_error()
             self.update_menu()
-            self.show_notification("Bootstrap Complete", "Configuration has been updated.")
-        except Exception as e:
-            error_msg = f"Bootstrap failed: {str(e)}"
-            logger.error(error_msg)
-            self.show_error("Bootstrap Error", error_msg)
+            self.open_config_file()
+            return
+        self.settings_running = True
+        self.update_menu()
+        threading.Thread(target=self.run_settings_window, name="settings", daemon=True).start()
+
+    def run_settings_window(self):
+        """Wait for the window on a daemon thread, so Quit and Update never wait for it, then act on how it closed."""
+        try:
+            process = subprocess.Popen(build_settings_command(), stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                       **self.platform.child_process_options())
+            output = process.communicate()[0].decode("utf-8", "replace")
+            exit_code = process.returncode
+        except OSError as error:
+            output, exit_code = str(error), None
+        finally:
+            self.settings_running = False
+        register_log_secrets(read_config_leniently())
+        self._read_config()
+        self.update_menu()
+        self.report_settings_result(exit_code, output)
+
+    def report_settings_result(self, exit_code, output):
+        """Tell the user what the window did, restarting the servers when they asked for it."""
+        if output.strip():
+            logger.info(f"Settings window output (exit code {exit_code}): {output.strip()}")
+        if exit_code in (SettingsExit.SAVED, SettingsExit.SAVED_RESTART):
+            servers = self.read_configured_servers()
+            self.show_notification("Settings Saved", "Connection saved." if servers else
+                                   "Connection saved. Add at least one server in config.json "
+                                   "(Configuration → Open Config File), then Start.")
+            if exit_code == SettingsExit.SAVED_RESTART and self.is_server_running:
+                self.restart_server()
+        elif exit_code == SettingsExit.TK_MISSING:
+            self.show_error("Settings", f"The Settings window needs Tk, which this Python lacks. {describe_tk_install()} "
+                                        "Opening config.json instead.")
+            self.open_config_file()
+        elif exit_code == SettingsExit.NO_DISPLAY:
+            self.show_error("Settings", "The Settings window needs a graphical display. Opening config.json instead.")
+            self.open_config_file()
+        elif exit_code != SettingsExit.CANCELLED:
+            logger.error(f"Settings closed unexpectedly (exit code {exit_code})")
+            self.show_error("Settings", "Settings closed unexpectedly. See the log.")
+
+    def read_configured_servers(self):
+        """The servers Start would use, which counts a legacy "mcpServers" block the plain settings miss."""
+        report = self.config_report
+        if report is not None and report.config is not None:
+            return report.config["servers"]
+        return (self.settings or {}).get("servers")
 
     def view_config(self, icon=None, item=None):
         """Display current configuration via notification."""
@@ -721,9 +765,14 @@ class MCPTrayApp:
         self.platform.notify(self.icon, title, message)
 
     def update_menu(self):
-        """Redraw the menu, icon and tooltip one at a time, so the last redraw shows the latest state; announce outside the lock, as a notification can take a while."""
-        if not self.icon:
+        """Ask for a redraw on the thread the tray's platform draws on; a request made while one is still waiting is already covered by it, since that one reads the state when it runs."""
+        if not self.icon or not self._redraw_requested.acquire(blocking=False):
             return
+        self.platform.run_on_ui_thread(self.redraw)
+
+    def redraw(self):
+        """Redraw the menu, icon and tooltip one at a time, so the last redraw shows the latest state; announce outside the lock, as a notification can take a while."""
+        self._redraw_requested.release()
         with self._redraw_lock:
             menu_items, dot, status, config_error_is_new = self.build_menu()
             self.icon.menu = pystray.Menu(*menu_items)
@@ -785,26 +834,20 @@ def run_tray(log_file=None, daemon=False):
     app.run()
 
 
-def has_duplicate_keys(value):
-    """Whether any object in the config repeats a key, which a rewrite of the file would silently resolve."""
-    if isinstance(value, dict):
-        return bool(getattr(value, "duplicate_keys", ())) or any(has_duplicate_keys(child) for child in value.values())
-    if isinstance(value, list):
-        return any(has_duplicate_keys(child) for child in value)
-    return False
-
-
 def save_log_level(level):
     """Write only "log_level" into config.json, keeping every other key, and only when it changes; refuse when a rewrite would drop a repeated key."""
-    config_file = get_config_file()
-    raw = load_config() if config_file.exists() else {"$schema": SCHEMA_REFERENCE}
-    if has_duplicate_keys(raw):
-        raise ConfigError(config_file, "Config file has duplicate keys", "Debug logging was not saved, so no key is lost",
-                          ConfigMistake.DUPLICATE_KEY)
-    if str(raw.get("log_level", INFO)).strip().lower() == level and config_file.exists():
-        return
-    raw["log_level"] = level
-    save_config(raw)
+    def set_level(raw):
+        changed = str(raw.get("log_level", INFO)).strip().lower() != level
+        if changed or "log_level" not in raw:
+            raw["log_level"] = level
+        return changed
+
+    update_config(set_level, "Debug logging")
+
+
+def build_settings_command():
+    """The Settings window as a separate process of this same Python, which -P keeps from importing anything in the working folder; whether to restart is decided against the servers running when it closes."""
+    return [sys.executable, "-P", "-m", "elitea_mcp.main", "settings", "--from-tray"]
 
 
 def main():

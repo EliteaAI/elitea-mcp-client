@@ -83,15 +83,50 @@ def backup_valid_config(config_file):
         return
     write_file_atomically(backup_file_for(config_file), config_file.read_bytes())
 
+def find_duplicate_key_paths(value, path=""):
+    """The dotted path of every key the config text repeats, which any rewrite of the file would silently resolve to its last value."""
+    if isinstance(value, dict):
+        repeated = [f"{path}{key}" for key in getattr(value, "duplicate_keys", ())]
+        return repeated + [found for key, child in value.items() for found in find_duplicate_key_paths(child, f"{path}{key}.")]
+    if isinstance(value, list):
+        return [found for index, child in enumerate(value) for found in find_duplicate_key_paths(child, f"{path}{index}.")]
+    return []
+
+
+def has_duplicate_keys(value):
+    """Whether any object in the config repeats a key, which a rewrite of the file would silently resolve."""
+    return bool(find_duplicate_key_paths(value))
+
+
+def load_config_for_update(unsaved):
+    """The raw config a partial update starts from, refusing a file a rewrite would damage and naming what was not saved."""
+    config_file = get_config_file()
+    if not config_file.exists():
+        return {"$schema": SCHEMA_REFERENCE}
+    raw = load_config(config_file)
+    repeated = find_duplicate_key_paths(raw)
+    if repeated:
+        raise ConfigError(config_file, "Config file has duplicate keys",
+                          f"{unsaved} was not saved, so no key is lost: {', '.join(repeated)} appears more than once",
+                          ConfigMistake.DUPLICATE_KEY)
+    return raw
+
+
+def update_config(update, unsaved):
+    """Let update change the raw config in place and save it when update reports a change or the file is new, keeping every other key."""
+    raw = load_config_for_update(unsaved)
+    if update(raw) or not get_config_file().exists():
+        save_config(raw)
+    return raw
+
+
 def set_bootstrap_config(deployment_url, auth_token, host='0.0.0.0', port=8000):
     """Set bootstrap configuration values."""
-    config = load_config() if get_config_file().exists() else {"$schema": SCHEMA_REFERENCE}
-    config["deployment_url"] = deployment_url
-    config["auth_token"] = auth_token
-    config["host"] = host
-    config["port"] = port
-    save_config(config)
-    return config
+    def apply(config):
+        config.update(deployment_url=deployment_url, auth_token=auth_token, host=host, port=port)
+        return True
+
+    return update_config(apply, "Bootstrap")
 
 def get_bootstrap_config(config=None):
     """Get bootstrap configuration values, from the given parsed config or from the file."""

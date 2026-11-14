@@ -198,6 +198,67 @@ def test_a_new_config_error_is_announced_after_the_redraw_releases_its_lock():
     assert lock_held == [False]
 
 
+def test_redraw_requests_made_while_one_is_waiting_are_merged_into_it():
+    app = build_tray()
+    app.icon = MagicMock()
+    app.create_icon_image = MagicMock()
+    scheduled = []
+    app.platform.run_on_ui_thread = scheduled.append
+
+    app.update_menu()
+    app.update_menu()
+    assert scheduled == [app.redraw]
+
+    scheduled.pop()()
+    app.update_menu()
+    assert scheduled == [app.redraw]
+
+
+def test_a_change_made_during_a_redraw_gets_a_redraw_of_its_own():
+    app = build_tray()
+    app.icon = MagicMock()
+    app.create_icon_image = MagicMock()
+    scheduled = []
+    app.platform.run_on_ui_thread = scheduled.append
+    original_build = app.build_menu
+    app.build_menu = lambda: (app.update_menu(), original_build())[1]
+
+    app.update_menu()
+    scheduled.pop()()
+
+    assert scheduled == [app.redraw]
+
+
+def test_a_failed_redraw_does_not_stop_later_ones():
+    app = build_tray()
+    app.icon = MagicMock()
+    app.build_menu = MagicMock(side_effect=RuntimeError("draw failed"))
+    with pytest.raises(RuntimeError):
+        app.update_menu()
+    app.build_menu = MagicMock(return_value=([], None, "Stopped", False))
+    app.create_icon_image = MagicMock()
+    app.update_menu()
+    app.build_menu.assert_called_once_with()
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="AppKit")
+def test_on_macos_a_worker_thread_redraw_is_handed_to_the_main_thread(monkeypatch):
+    from src.elitea_mcp.tray_platforms import macos
+    handed = []
+    monkeypatch.setattr(macos.AppHelper, "callAfter", handed.append)
+    ran = []
+    tray_platform = macos.MacOSTray()
+
+    tray_platform.run_on_ui_thread(lambda: ran.append("main"))
+    worker = threading.Thread(target=tray_platform.run_on_ui_thread, args=(lambda: ran.append("worker"),))
+    worker.start()
+    worker.join()
+
+    assert ran == ["main"] and len(handed) == 1
+    handed[0]()
+    assert ran == ["main", "worker"]
+
+
 def read_pixel(image, x, y):
     return image.getpixel((x, y))
 

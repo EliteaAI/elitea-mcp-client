@@ -16,15 +16,18 @@ from .config import (
     get_config_file,
     interactive_bootstrap,
     load_config,
+    load_config_for_update,
 )
 from .config_model import check_config, write_config_schema
 from .clients.elitea import Agent, Agents, ApiDetailsRequestError
 from .server.mcp import run
 from .utils.diagnostics import DOCTOR_HINT, REPORT_TITLE, DoctorContext, exit_code, format_results, run_checks, summarize
 from .utils.package_updates import get_installed_version
+from .settings_form import exit_code_for_cli
+from .settings_window import run_settings_window
 from .utils.logging_setup import (CLI, DAEMON, OWNER_ONLY_FILE_MODE, OWNER_ONLY_FOLDER_MODE, RUN_SSE, RUN_STDIO, SERVE,
-                                  build_daemon_output_path, register_log_secrets, report_unwritable_log, restrict_to_owner,
-                                  setup_logging)
+                                  build_daemon_output_path, install_crash_hooks, register_log_secrets,
+                                  report_unwritable_log, restrict_to_owner, setup_logging)
 from .utils.preflight import PreflightError, validate_platform_config
 from .utils.server_loader import redact_urls
 
@@ -338,6 +341,7 @@ def bootstrap(deployment_url=None, auth_token=None, host='0.0.0.0', port=8000):
     Bootstrap the client with deployment URL and authentication token.
     If parameters are not provided, runs in interactive mode.
     """
+    load_config_for_update("Bootstrap")
     if deployment_url is not None and auth_token is not None:
         # Non-interactive mode with command line arguments
         config = set_bootstrap_config(deployment_url, auth_token, host, port)
@@ -436,6 +440,9 @@ def run_cli():
     validate_parser = subparsers.add_parser("validate", help="Check the config file and list every problem; exits non-zero when any is an error")
     validate_parser.add_argument('--config', type=str, help='Config file to check (defaults to the client config file)')
 
+    settings_parser = subparsers.add_parser("settings", help="Open the Settings window to set the deployment URL, token and project ID")
+    settings_parser.add_argument('--from-tray', action='store_true', help=argparse.SUPPRESS)
+
     doctor_parser = subparsers.add_parser("doctor", help="Check the whole local setup (client, config, platform, local servers) and print one line per check; exits non-zero when any check fails")
     doctor_parser.add_argument('--config', type=str, help='Config file to check (defaults to the client config file)')
     
@@ -445,6 +452,10 @@ def run_cli():
         validate(args.config)
     elif args.command == "doctor":
         doctor(args.config)
+    elif args.command == "settings":
+        install_crash_hooks()
+        exit_code = run_settings_window()
+        sys.exit(exit_code if args.from_tray else exit_code_for_cli(exit_code))
     elif args.command == "bootstrap":
         bootstrap(
             deployment_url=args.deployment_url if hasattr(args, 'deployment_url') else None,

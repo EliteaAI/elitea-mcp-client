@@ -120,7 +120,8 @@ class ServerController:
             return False
         if not report.config["servers"]:
             self._record_error(report.summarize_skipped_servers(len(report.skipped_servers)) if report.skipped_servers
-                               else "No servers configured. Please bootstrap servers first.")
+                               else "No servers configured. Add at least one server in config.json "
+                                    "(Configuration → Open Config File), then Start.")
             return False
         if report.skipped_servers:
             self._notify_error(report.summarize_skipped_servers(len(report.config["servers"]) + len(report.skipped_servers)))

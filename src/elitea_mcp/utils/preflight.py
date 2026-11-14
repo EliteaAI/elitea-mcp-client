@@ -125,7 +125,7 @@ def normalize_deployment_url(raw_url) -> str:
 def validate_project_id(value) -> int:
     """Return the configured project id as an integer."""
     if value is None or value == "":
-        raise PreflightError('"project_id" is not set. Run Bootstrap or add "project_id": <number> to config.')
+        raise PreflightError('"project_id" is not set. Open Settings in the tray, run elitea-mcp bootstrap, or add "project_id": <number> to config.')
     try:
         return int(str(value).strip())
     except ValueError:
@@ -135,7 +135,7 @@ def validate_project_id(value) -> int:
 def validate_auth_token(token) -> str:
     """Return the configured token, which every platform call needs."""
     if not token:
-        raise PreflightError('"auth_token" is not set. Run Bootstrap or add "auth_token" to config.')
+        raise PreflightError('"auth_token" is not set. Open Settings in the tray, run elitea-mcp bootstrap, or add "auth_token" to config.')
     return token
 
 

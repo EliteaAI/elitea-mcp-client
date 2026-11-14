@@ -42,7 +42,7 @@ python -m elitea_mcp.tray
 
 1. **Start the tray application** using one of the methods above
 2. **Right-click the tray icon** (blue circle with "MCP" text)
-3. **Select "Configuration" > "Edit Config"** or "Bootstrap"
+3. **Select "Configuration" > "Settings…"** or "Open Config File"
 4. **Enter your configuration**:
    - Deployment URL: Your EliteA deployment URL
    - Auth Token: Your authentication token
@@ -159,7 +159,7 @@ elitea-mcp bootstrap
 - **Restart MCP Server**
 - **Configuration**
   - **Edit Config**: GUI dialog for editing settings
-  - **Bootstrap**: Configuration wizard
+  - **Settings…**: Connection settings window
   - **View Current Config**: Display current settings
 - **About**: Application information
 - **Quit**: Exit application

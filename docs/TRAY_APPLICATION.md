@@ -48,7 +48,7 @@ Right-click on the tray icon to access:
 - **Configuration**:
   - **Open Config File**: Open the JSON configuration file in your default text editor
   - **Open Config Folder**: Open the configuration directory in your file manager
-  - **Bootstrap (Terminal)**: Run the interactive bootstrap configuration in the terminal
+  - **Settings…**: Set the deployment URL, token and project ID in a window, with Test connection
   - **View Current Config**: Display current configuration in the console
 - **About**: Show application information in the console
 - **Quit**: Exit the tray application
@@ -59,7 +59,7 @@ The tray application provides file-based configuration management:
 
 - **Open Config File**: Opens the JSON configuration file (`~/.config/elitea-mcp/config.json` on Linux/macOS, `%APPDATA%\elitea-mcp\config.json` on Windows) in your default text editor
 - **Open Config Folder**: Opens the configuration directory in your system's file manager
-- **Bootstrap (Terminal)**: Runs the interactive bootstrap configuration in the current terminal
+- **Settings…**: Set the deployment URL, token and project ID in a small window, test the connection and save. It needs Tk; without it, the tray shows how to install Tk and opens config.json instead
 - **View Current Config**: Displays the current configuration in the console with sensitive data masked
 
 This approach provides:
@@ -229,7 +229,7 @@ systemctl --user start elitea-mcp-tray.service
 
 ### Configuration Issues
 
-- Use "Bootstrap" from the tray menu to reconfigure
+- Use "Settings…" from the tray menu, or `elitea-mcp bootstrap` in a terminal, to reconfigure
 - Check that config files have proper permissions
 - Verify network connectivity to your deployment URL
 

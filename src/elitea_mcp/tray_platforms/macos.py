@@ -5,7 +5,8 @@ import subprocess
 
 import AppKit
 import objc
-from Foundation import NSObject
+from Foundation import NSObject, NSThread
+from PyObjCTools import AppHelper
 from PIL import Image
 
 from .base import TrayPlatform
@@ -49,6 +50,7 @@ def escape_for_applescript(text):
 
 class MacOSTray(TrayPlatform):
     clipboard_commands = (["pbcopy"],)
+    open_window_hint = "in the Dock or with Cmd+Tab"
 
     def __init__(self):
         self.menu_bar_is_dark = True
@@ -90,6 +92,17 @@ class MacOSTray(TrayPlatform):
         self._appearance_observer.on_change = follow
         button.addObserver_forKeyPath_options_context_(self._appearance_observer, "effectiveAppearance",
                                                        AppKit.NSKeyValueObservingOptionInitial, None)
+
+    def run_on_ui_thread(self, function):
+        """AppKit draws on the main thread only: building a menu elsewhere waits for the main thread, which may itself be waiting for that redraw."""
+        if NSThread.isMainThread():
+            function()
+        else:
+            AppHelper.callAfter(function)
+
+    def child_process_options(self):
+        """A window started from the menu bar app is a child of a GUI process, which must skip the fork-safety check."""
+        return {"env": fork_safe_environment()}
 
     def notify(self, icon, title, message):
         """A native notification through osascript; pystray's own is the fallback, on one line, since a multi-line one opens Script Editor."""

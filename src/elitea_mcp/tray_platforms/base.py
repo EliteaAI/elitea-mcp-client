@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 
 class TrayPlatform:
     logo_file_name = "logo64x64.png"
+    open_window_hint = "in the taskbar"
     clipboard_commands = ()
 
     def prepare_app(self):
@@ -24,6 +25,14 @@ class TrayPlatform:
 
     def format_menu_label(self, text):
         return text
+
+    def run_on_ui_thread(self, function):
+        """Run function where this platform's tray may be drawn; the calling thread, unless a platform says otherwise."""
+        function()
+
+    def child_process_options(self):
+        """The Popen options a window this tray starts needs on this platform."""
+        return {}
 
     def notify(self, icon, title, message):
         if icon:

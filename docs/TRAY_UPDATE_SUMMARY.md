@@ -26,7 +26,7 @@ Replaced GUI dialogs with file-based operations:
 Updated tray context menu:
 - **Open Config File** - Opens JSON config in default text editor
 - **Open Config Folder** - Opens config directory in file manager  
-- **Bootstrap (Terminal)** - Runs interactive setup in terminal
+- **Settings…** - Opens a window for the deployment URL, token and project ID
 - **View Current Config** - Shows config in console with masked tokens
 
 ### 4. **Cross-Platform File Operations**
@@ -61,7 +61,7 @@ Updated all documentation to reflect the simplified approach:
 ### ✅ **Enhanced Functionality**
 - **Open Config File**: Direct access to JSON configuration
 - **Open Config Folder**: Easy access to all config files
-- **Terminal Bootstrap**: Full-featured interactive setup
+- **Settings…**: Connection settings with Test connection
 - **Console Output**: Clear, formatted information display
 
 ## Technical Verification
@@ -93,8 +93,8 @@ elitea-mcp tray
 # Right-click tray icon → Configuration → Open Config File
 # → Opens ~/.config/elitea-mcp/config.json in default editor
 
-# Right-click tray icon → Configuration → Bootstrap (Terminal)  
-# → Runs interactive setup in current terminal
+# Right-click tray icon → Configuration → Settings…
+# → Opens the connection settings window
 ```
 
 ### Server Control

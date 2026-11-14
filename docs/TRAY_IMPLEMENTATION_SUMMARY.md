@@ -123,7 +123,7 @@ Use 'Open Config File' to edit configuration
 ### Typical Workflow
 1. **Start tray app** → Icon appears in system tray
 2. **Right-click icon** → Context menu opens
-3. **Configure** → "Configuration" > "Open Config File" or "Bootstrap (Terminal)"
+3. **Configure** → "Configuration" > "Settings…" or "Open Config File"
 4. **Start servers** → "Start MCP Server"
 5. **Monitor status** → Notifications show progress
 6. **Restart if needed** → "Restart MCP Server"

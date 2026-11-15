@@ -337,7 +337,7 @@ The client stores configuration in your OS's standard app data directory:
 - **macOS**: `~/Library/Application Support/elitea-mcp-client`
 - **Linux**: `~/.config/elitea-mcp-client`
 
-Next to `config.json` the client keeps `client_id`, which tells ELITEA that a reconnecting or restarted client is the same installation. It is tied to the machine: a copy on another machine is replaced by a new id. A second copy of the client running at the same time (for example the tray and `elitea-mcp serve`) uses a temporary id, so its servers with the same names are declined instead of taking over the first copy's.
+Next to `config.json` the client keeps `client_id`, which tells ELITEA that a reconnecting or restarted client is the same installation. It is tied to the machine: a copy on another machine is replaced by a new id. Only one copy of the client runs per user: a tray **or** `elitea-mcp serve`. A second tray or `serve` (also with `--daemon`) is refused before it starts any server, with `ELITEA MCP Client is already running (PID 1234, tray).`, and exits with code 1. The running copy holds `client_id.lock` for its whole life and names itself in `client_id.owner.json`; the system releases the lock when the process ends, even after a crash, so a stale lock never blocks the next start. `elitea-mcp run`, `elitea-mcp doctor` and the Settings window are not affected. Where the lock cannot be used (for example a network home without file locking), a warning is logged and a second copy falls back to a temporary id, so its servers with the same names are declined instead of taking over the first copy's.
 
 ### Bootstrap Configuration
 
@@ -569,6 +569,7 @@ ELITEA MCP doctor
       Install Node.js or use the full path in "command".
   ⚠ Running client: another client is running servers with this config; servers were started a second time for this check, so a server that holds a port may fail here only
   ⚠ Running session: "jira" (stdio): declined (name already registered)
+  ✓ Instance: running (PID 4312, tray)
   ✓ Logs: /Users/you/.local/var/log/elitea-mcp
 
 1 problem, 2 warnings.
@@ -577,7 +578,7 @@ ELITEA MCP doctor
 - ✓ passed, ⚠ worth a look, ✗ broken. The exit code is 1 only when a line is ✗.
 - The report never contains the token, header or `env` values, or a server's own output, and shows every URL as scheme and host only, since hosted MCP servers often carry a key in the URL path. When a failed server wrote output, its line ends with `Details: <file>`, the same masked `<server>-error.txt` the tray's **Servers** menu opens.
 - The tray saves the report as `elitea-mcp-diagnostics.txt` next to the tray log, opens it and copies it to the clipboard, ready to paste into a support request.
-- While a tray or `serve` runs servers, it writes their status to `status.json` in the config folder (owner-only) and removes it when the servers stop, so the doctor can show the running session; a session that stops updating it for 60 s is reported as possibly frozen.
+- While a tray or `serve` runs servers, it writes their status to `status.json` in the config folder (owner-only) and removes it when the servers stop, so the doctor can show the running session; a session that stops updating it for 60 s is reported as possibly frozen. The Instance line names the tray or `serve` that holds `client_id.lock`, so a frozen one can be told apart from none; it reads "unknown" when the lock cannot be used.
 
 #### macOS: "Fork Safety" Errors
 If you encounter fork safety errors on macOS, they have been automatically resolved in version 0.1.10+. The client now uses fork-safe daemon mode for GUI applications.

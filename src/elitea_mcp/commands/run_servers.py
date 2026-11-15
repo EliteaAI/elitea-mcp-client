@@ -8,7 +8,9 @@ from ..utils.logging_setup import SERVE, setup_logging
 from ..utils.preflight import PreflightError, validate_platform_config
 from ..utils.server_registry import FAILED
 from ..utils.server_output import flush_server_output
+from ..utils.pid_file import write_pid_file
 from ..utils.server_supervisor import ServerSupervisor, collect_skipped_servers
+from ..utils.single_instance import AlreadyRunningError, hold_instance
 from ..utils.sio import PlatformConnectionError
 
 CTRL_C_POLL_SECONDS = 1
@@ -16,7 +18,14 @@ CTRL_C_POLL_SECONDS = 1
 logger = logging.getLogger(__name__)
 
 
-def run_servers(log_mode=SERVE, log_file=None):
+def run_servers(log_mode=SERVE, log_file=None, pid_file=None):
+    try:
+        hold_instance(SERVE)
+    except AlreadyRunningError as error:
+        print(error, file=sys.stderr)
+        sys.exit(1)
+    if pid_file:
+        write_pid_file(pid_file)
     raw_config = load_config()
     report = check_config(raw_config)
     setup_logging(log_mode, report.config, log_file)

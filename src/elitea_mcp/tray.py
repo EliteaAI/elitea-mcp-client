@@ -35,6 +35,8 @@ from .config_errors import ConfigError
 from .config import get_bootstrap_config, get_config_file, has_duplicate_keys, load_config, update_config
 from .config_model import NOTIFICATION_LIMIT, check_config, needs_restart, write_config_schema
 from .utils.config_watcher import ConfigFileWatcher
+from .utils.pid_file import write_pid_file
+from .utils.single_instance import AlreadyRunningError, hold_instance
 from .utils.server_controller import get_server_controller
 from .utils.diagnostics import REPORT_FILE_NAME, TRAY_DIAGNOSTICS_HINT, DoctorContext, format_report, run_checks, summarize
 from .utils.server_loader import redact_urls
@@ -920,7 +922,7 @@ class MCPTrayApp:
         self.icon.run(setup=self._on_tray_ready)
 
 
-def run_tray(log_file=None, daemon=False):
+def run_tray(log_file=None, daemon=False, pid_file=None):
     """Entry point for the tray application."""
     # Set fork safety for macOS BEFORE any other imports or operations
     if platform.system() == "Darwin":
@@ -930,9 +932,37 @@ def run_tray(log_file=None, daemon=False):
     setup_logging(DAEMON if daemon else TRAY, read_config_leniently(), log_file)
     if log_file:
         logger.info(f"Logging to file: {log_file}")
-    
+    try:
+        hold_instance(TRAY)
+    except AlreadyRunningError as error:
+        show_already_running(error)
+        sys.exit(1)
+    if pid_file:
+        write_pid_file(pid_file)
     app = MCPTrayApp(log_file)
     app.run()
+
+
+def show_already_running(error):
+    """Say why this tray exits: in the log and on stderr, and in a box only when no terminal shows stderr, as the box waits for a click."""
+    message = str(error)
+    logger.error(message)
+    print(message, file=sys.stderr)
+    if sys.stderr is not None and sys.stderr.isatty():
+        return
+    try:
+        import tkinter
+        from tkinter import messagebox
+    except ImportError:
+        return
+    try:
+        root = tkinter.Tk()
+    except tkinter.TclError as tk_error:
+        logger.debug(f"Cannot show the already-running message box: {tk_error}")
+        return
+    root.withdraw()
+    messagebox.showerror(APP_NAME, message, parent=root)
+    root.destroy()
 
 
 def save_log_level(level):

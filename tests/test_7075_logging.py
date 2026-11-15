@@ -575,7 +575,8 @@ def test_a_daemon_sends_its_raw_output_to_a_private_out_file_and_tells_the_tray_
     with pytest.raises(SystemExit):
         main_module.macos_gui_daemonize(str(tmp_path / "tray.pid"), str(log_file))
 
-    assert started["cmd"] == ["/usr/local/bin/elitea-mcp", "tray", "--log-file", str(log_file)]
+    assert started["cmd"] == ["/usr/local/bin/elitea-mcp", "tray", "--log-file", str(log_file),
+                              "--pid-file", str(tmp_path / "tray.pid")]
     assert started["stdout"] == str(tmp_path / "elitea-mcp-tray.out")
     assert stat.S_IMODE((tmp_path / "elitea-mcp-tray.out").stat().st_mode) == 0o600
 

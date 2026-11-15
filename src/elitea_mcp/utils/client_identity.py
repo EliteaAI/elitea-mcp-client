@@ -70,6 +70,21 @@ def hold_lock(path):
     return True
 
 
+def keep_until_exit(path, handle):
+    """Keep a lock taken elsewhere for the rest of this process, where hold_lock finds it already held."""
+    _held_locks[str(path)] = handle
+
+
+def is_held_here(path):
+    return str(path) in _held_locks
+
+
+def release_held_lock(path):
+    handle = _held_locks.pop(str(path), None)
+    if handle is not None:
+        release_lock(handle)
+
+
 def lock_exclusively(handle):
     if fcntl is not None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

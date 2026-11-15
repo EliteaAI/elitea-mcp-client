@@ -3,7 +3,6 @@ import argparse
 import logging
 import sys
 import signal
-import atexit
 from pathlib import Path
 
 from elitea_mcp.commands.bootstrap_servers import bootstrap_servers
@@ -30,6 +29,7 @@ from .utils.logging_setup import (CLI, DAEMON, OWNER_ONLY_FILE_MODE, OWNER_ONLY_
                                   report_unwritable_log, restrict_to_owner, setup_logging)
 from .utils.preflight import PreflightError, validate_platform_config
 from .utils.server_loader import redact_urls
+from .utils.single_instance import Holder, describe_holder, find_holder
 
 
 logger = logging.getLogger(__name__)
@@ -165,6 +165,8 @@ def macos_gui_daemonize(pid_file=None, log_file=None):
             cmd = [elitea_mcp_cmd, 'tray']
         if log_file:
             cmd += ['--log-file', str(log_file)]
+        if pid_file:
+            cmd += ['--pid-file', str(pid_file)]
         
         # Set up environment for the subprocess
         env = os.environ.copy()
@@ -193,11 +195,6 @@ def macos_gui_daemonize(pid_file=None, log_file=None):
                 start_new_session=True,
                 preexec_fn=None
             )
-        
-        # Write PID file with the subprocess PID
-        if pid_file:
-            with open(pid_file, 'w+') as f:
-                f.write(str(process.pid) + '\n')
         
         logger.info(f"Tray daemon started with PID: {process.pid}")
         
@@ -267,23 +264,8 @@ def daemonize(pid_file=None, log_file=None):
         with open('/dev/null', 'a+') as se:
             os.dup2(se.fileno(), sys.stderr.fileno())
     
-    # Write PID file
     if pid_file:
-        pid = str(os.getpid())
-        with open(pid_file, 'w+') as f:
-            f.write(pid + '\n')
-        
-        # Set up cleanup on exit
-        def cleanup():
-            try:
-                os.remove(pid_file)
-            except:
-                pass
-        atexit.register(cleanup)
-        
-        # Handle termination signals
         def signal_handler(signum, frame):
-            cleanup()
             sys.exit(0)
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
@@ -392,6 +374,14 @@ def doctor(config_file=None):
     sys.exit(exit_code(results))
 
 
+def exit_if_already_running():
+    """Refuse in the launching terminal, before a fork or a spawn would hide the refusal in the daemon's output."""
+    holder = find_holder()
+    if isinstance(holder, Holder):
+        print(describe_holder(holder), file=sys.stderr)
+        sys.exit(1)
+
+
 def cli():
     try:
         run_cli()
@@ -466,6 +456,7 @@ def run_cli():
     elif args.command == "serve":
         # Handle daemon mode for serve command
         if hasattr(args, 'daemon') and args.daemon:
+            exit_if_already_running()
             default_paths = get_default_paths()
             pid_file = args.pid_file if hasattr(args, 'pid_file') and args.pid_file else default_paths['serve_pid']
             log_file = args.log_file if hasattr(args, 'log_file') and args.log_file else default_paths['serve_log']
@@ -475,7 +466,7 @@ def run_cli():
             logger.info(f"Log file: {log_file}")
             
             if daemonize(str(pid_file), str(log_file)):
-                run_servers(DAEMON, str(log_file))
+                run_servers(DAEMON, str(log_file), str(pid_file))
         else:
             run_servers(SERVE, args.log_file or find_default_log_file('serve_log'))
             
@@ -494,10 +485,12 @@ def run_cli():
                 # Already set, ignore
                 pass
         
-        from .tray import run_tray
-        
         # Check if this is a daemon subprocess (even without --daemon flag)
         is_daemon_subprocess = os.environ.get('ELITEA_MCP_DAEMON_MODE') == 'true'
+        if (hasattr(args, 'daemon') and args.daemon) and not is_daemon_subprocess:
+            exit_if_already_running()
+
+        from .tray import run_tray
         
         # Handle daemon mode for tray command
         if (hasattr(args, 'daemon') and args.daemon) and not is_daemon_subprocess:
@@ -518,12 +511,13 @@ def run_cli():
             else:
                 # Traditional Unix daemonization for non-macOS systems
                 if daemonize(str(pid_file), str(log_file)):
-                    run_tray(log_file=str(log_file), daemon=True)
+                    run_tray(log_file=str(log_file), daemon=True, pid_file=str(pid_file))
         else:
             # Normal mode or daemon subprocess
             if is_daemon_subprocess:
                 logger.info("Running in macOS daemon subprocess...")
-            run_tray(log_file=args.log_file, daemon=is_daemon_subprocess)
+            run_tray(log_file=args.log_file, daemon=is_daemon_subprocess,
+                     pid_file=args.pid_file if is_daemon_subprocess else None)
     elif args.command == "run" or args.command is None:
         main(
             project_id=args.project_id if hasattr(args, 'project_id') else None,

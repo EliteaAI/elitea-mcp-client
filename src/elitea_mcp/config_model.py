@@ -1,6 +1,7 @@
 import difflib
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -117,6 +118,22 @@ def parse_timeout_seconds(value, info: ValidationInfo):
     return seconds
 
 
+def parse_check_interval_hours(value, info: ValidationInfo):
+    """Accept what float() accepts; fall back with a warning on anything that is not a finite number, and hold a positive interval to an hour so a typo cannot flood PyPI."""
+    try:
+        hours = float(value) if not isinstance(value, bool) else math.nan
+    except (TypeError, ValueError, OverflowError):
+        hours = math.nan
+    if not math.isfinite(hours):
+        add_field_problem(info, Severity.WARNING, info.field_name,
+                          f"is not a number of hours, so {DEFAULT_CHECK_INTERVAL_HOURS} is used.")
+        return DEFAULT_CHECK_INTERVAL_HOURS
+    if 0 < hours < 1:
+        add_field_problem(info, Severity.WARNING, info.field_name, "is less than 1 hour, so 1 is used.")
+        return 1
+    return hours
+
+
 def parse_log_level(value, info: ValidationInfo):
     """Read "info" or "debug" in any case; anything else is a warning and info is used, so a typo never stops the client."""
     level = value.strip().lower() if isinstance(value, str) else value
@@ -134,7 +151,7 @@ def parse_project_id(value):
     try:
         return validate_project_id(value)
     except PreflightError:
-        raise PydanticCustomError("project_id_not_number", 'must be a number, got "{value}"', {"value": value}) from None
+        raise PydanticCustomError("project_id_not_number", "must be a number") from None
 
 
 def validate_deployment_url(value):
@@ -158,6 +175,7 @@ def treat_null_headers_as_empty(value):
 Truthy = Annotated[bool, BeforeValidator(read_flag_and_warn_on_false_text)]
 Seconds = Annotated[int, BeforeValidator(parse_timeout_seconds)]
 LogLevel = Annotated[Literal["info", "debug"], BeforeValidator(parse_log_level)]
+CheckIntervalHours = Annotated[float, BeforeValidator(parse_check_interval_hours)]
 
 
 STARTUP_TIMEOUT_DESCRIPTION = "Seconds a server may take to start and answer, before it is reported as timed out"
@@ -197,8 +215,8 @@ class ClientConfig(BaseModel):
     startup_timeout: Seconds = Field(DEFAULT_STARTUP_TIMEOUT, description=STARTUP_TIMEOUT_DESCRIPTION)
     ssl_verify: Truthy = Field(False, description="Verify the platform's TLS certificate")
     update_check: Truthy = Field(True, description="Check PyPI for new versions of the client")
-    update_check_interval_hours: Any = Field(DEFAULT_CHECK_INTERVAL_HOURS,
-                                             description="Hours between update checks; 0 or less checks once")
+    update_check_interval_hours: CheckIntervalHours = Field(DEFAULT_CHECK_INTERVAL_HOURS,
+                                                            description="Hours between update checks, at least 1; 0 or less checks once")
     log_level: LogLevel = Field("info", description='"debug" adds detail to the logs of the tray, serve and run; '
                                                     "tool arguments, results and conversations are never logged")
     servers: dict[str, Union[StdioServer, RemoteServer]] = Field(
@@ -348,6 +366,13 @@ def check_config(raw):
         blockers = [ConfigProblem(Severity.ERROR, format_problem_path("", detail["loc"]), explain_validation_error(detail)) for detail in error.errors()]
         return ConfigReport(None, blockers + context["problems"], context["skipped"])
     return ConfigReport(model.model_dump(by_alias=True), context["problems"], context["skipped"])
+
+
+def needs_restart(running, new):
+    """Whether the new config changes a setting a running session picks up only on a restart."""
+    read_live_or_never = {"$schema", "log_level", "host", "port", "update_check", "update_check_interval_hours"}
+    keys = [model_field.alias or name for name, model_field in ClientConfig.model_fields.items()]
+    return any(running.get(key) != new.get(key) for key in keys if key not in read_live_or_never)
 
 
 def write_config_schema():

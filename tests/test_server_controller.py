@@ -9,9 +9,9 @@ def test_restart_servers_when_running():
     with patch.object(controller, "stop_servers") as stop_mock, \
          patch.object(controller, "start_servers", return_value=True) as start_mock, \
          patch("src.elitea_mcp.utils.server_controller.time.sleep"):
-        result = controller.restart_servers()
+        result = controller.restart_servers(raw_config={"servers": {}})
         stop_mock.assert_called_once()
-        start_mock.assert_called_once_with(daemon_mode=True)
+        start_mock.assert_called_once_with(daemon_mode=True, raw_config={"servers": {}})
         assert result is True
 
 
@@ -40,7 +40,7 @@ def test_restart_servers_when_not_running():
          patch("src.elitea_mcp.utils.server_controller.time.sleep"):
         result = controller.restart_servers()
         stop_mock.assert_not_called()
-        start_mock.assert_called_once_with(daemon_mode=False)
+        start_mock.assert_called_once_with(daemon_mode=False, raw_config=None)
         assert result is True
 
 

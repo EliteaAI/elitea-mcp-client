@@ -33,7 +33,8 @@ from PIL import Image, ImageDraw
 
 from .config_errors import ConfigError
 from .config import get_bootstrap_config, get_config_file, has_duplicate_keys, load_config, update_config
-from .config_model import NOTIFICATION_LIMIT, check_config, write_config_schema
+from .config_model import NOTIFICATION_LIMIT, check_config, needs_restart, write_config_schema
+from .utils.config_watcher import ConfigFileWatcher
 from .utils.server_controller import get_server_controller
 from .utils.diagnostics import REPORT_FILE_NAME, TRAY_DIAGNOSTICS_HINT, DoctorContext, format_report, run_checks, summarize
 from .utils.server_loader import redact_urls
@@ -57,6 +58,31 @@ STATUS_DOT_COLORS = {
     CONNECTED: (76, 175, 80, 255),
 }
 UPDATE_BADGE_COLOR = (255, 152, 0, 255)
+KEEP_RUNNING = "The servers keep running the previous config."
+CONFIG_CHANGED = "config.json changed."
+
+
+def fit_notification_text(text):
+    """Cut a notification to what Windows accepts, which refuses balloon text over 256 characters."""
+    return text if len(text) <= NOTIFICATION_LIMIT else text[:NOTIFICATION_LIMIT - 3] + "..."
+
+
+def describe_problem_count(count):
+    return f"{count} problem{'s' if count > 1 else ''}"
+
+
+def read_update_settings(config):
+    """Whether to check for updates and how often, as an update checker is built from them."""
+    return bool(config.get("update_check", True)), config.get("update_check_interval_hours", DEFAULT_CHECK_INTERVAL_HOURS)
+
+
+def find_restart_refusal(config):
+    """Why a restart with this resolved config would leave nothing running, or None."""
+    if not config.get("deployment_url") or not config.get("auth_token"):
+        return f"config.json changed, but it has no deployment URL or token (Configuration → Settings…). {KEEP_RUNNING}"
+    if not config["servers"]:
+        return f"config.json changed, but no server in it can start (Validate Config to see why). {KEEP_RUNNING}"
+    return None
 
 
 def count_utf16_units(character):
@@ -93,13 +119,16 @@ class MCPTrayApp:
         self.diagnostics_running = False
         self.settings_running = False
         self.has_duplicate_keys = False
+        self._raw_config = None
+        self._restart_announced = False
+        self._update_checks_started = False
         self._read_config()
-        config = self.settings
-        self.update_checker = (
-            UpdateChecker(self.on_update_state_change,
-                          config.get("update_check_interval_hours", DEFAULT_CHECK_INTERVAL_HOURS))
-            if config and config.get("update_check", True) else None
-        )
+        checked = self.config_report.config if self.config_report else None
+        config = checked if checked is not None else self.settings
+        self._log_level = checked["log_level"] if checked is not None else None
+        self._update_settings = read_update_settings(config) if config else None
+        self.update_checker = self.build_update_checker(*self._update_settings) if config else None
+        self.config_watcher = ConfigFileWatcher(get_config_file(), self.update_menu)
         
         # Set up callbacks for server controller
         self.server_controller.set_status_callback(self.on_server_status_change)
@@ -259,17 +288,20 @@ class MCPTrayApp:
 
     def get_menu_items(self):
         """Create the context menu for the tray icon, announcing a config error the moment it appears."""
-        menu_items, _, _, config_error_is_new = self.build_menu()
-        if config_error_is_new:
-            self.report_config_error()
+        menu_items, _, _, announce = self.build_menu()
+        if announce:
+            announce()
         return menu_items
 
     def build_menu(self):
-        """The menu items, the dot and status they show, and whether this read of the config found a new error to announce."""
+        """The menu items, the dot and status they show, and the announcement this read of the config calls for, if any."""
         previous_error = str(self.config_error) if self.config_error else None
         config = self._read_config()
         config_error_is_new = bool(self.config_error) and str(self.config_error) != previous_error
+        self.apply_live_settings()
         dot, status = self.read_client_state()
+        pending, restart_notice = self.find_pending_restart()
+        announce = self.report_config_error if config_error_is_new else restart_notice
         
         menu_items = [
             pystray.MenuItem(self.format_menu_header(status), lambda: None, enabled=False),
@@ -277,8 +309,7 @@ class MCPTrayApp:
         ]
         problem_count = len(self.config_report.notable) if config is not None else 0
         if problem_count:
-            plural = "s" if problem_count > 1 else ""
-            menu_items.append(pystray.MenuItem(f"Config has {problem_count} problem{plural} (Validate Config to see)",
+            menu_items.append(pystray.MenuItem(f"Config has {describe_problem_count(problem_count)} (Validate Config to see)",
                                                lambda: None, enabled=False))
         
         if config is None:
@@ -295,7 +326,8 @@ class MCPTrayApp:
             else:
                 menu_items.extend([
                     pystray.MenuItem(f"Stop MCP Server", self.stop_server),
-                    pystray.MenuItem("Restart MCP Server", self.restart_server),
+                    pystray.MenuItem("Restart MCP Server to Apply Changes" if pending else "Restart MCP Server",
+                                     self.restart_server),
                 ])
             menu_items.append(pystray.Menu.SEPARATOR)
 
@@ -338,7 +370,28 @@ class MCPTrayApp:
             pystray.MenuItem("Quit", self.quit_app),
         ])
         
-        return menu_items, dot, status, config_error_is_new
+        return menu_items, dot, status, announce
+
+    def find_pending_restart(self):
+        """Whether the file's config differs from what this tray's session runs, and the one notice of that pending period."""
+        controller = self.server_controller
+        report = self.config_report
+        if report is None or report.config is None:
+            return False, None
+        if (controller.daemon_mode or not controller.is_running or controller.stop_event.is_set()
+                or not (needs_restart(controller.config, report.config)
+                        or report.skipped_servers != controller.skipped_names)):
+            self._restart_announced = False
+            return False, None
+        refusal = find_restart_refusal(report.config)
+        if self.settings_running or self._restart_announced:
+            return not refusal, None
+        self._restart_announced = True
+        return not refusal, functools.partial(self.show_notification, "Restart Needed", refusal or self.describe_config_change())
+
+    def describe_config_change(self):
+        count = len(self.config_report.notable)
+        return f"{CONFIG_CHANGED} It has {describe_problem_count(count)} (Validate Config to see)." if count else CONFIG_CHANGED
 
     def build_servers_menu(self):
         """One row per server of the current or last run; a failed or declined row opens its error details."""
@@ -417,8 +470,10 @@ class MCPTrayApp:
         try:
             raw = load_config()
         except ConfigError as error:
-            self.config_error, self.config_report, self.settings = error, None, None
+            self.config_error, self.config_report, self.settings, self._raw_config = error, None, None, None
             return None
+        register_log_secrets(raw)
+        self._raw_config = raw
         self.config_report = check_config(raw)
         self.settings = get_bootstrap_config(raw)
         self.has_duplicate_keys = has_duplicate_keys(raw)
@@ -427,10 +482,38 @@ class MCPTrayApp:
         self.config_error = self.config_report if self.config_report.config is None else None
         return None if self.config_error else self.settings
 
+    def apply_live_settings(self):
+        """Apply a changed "log_level" and update-check settings of the checked config at once; "log_level" takes the file's own value, so ELITEA_MCP_DEBUG=1 stays a start-up override."""
+        config = self.config_report.config if self.config_report else None
+        if config is None:
+            return
+        if self._log_level is not None and config["log_level"] != self._log_level:
+            apply_debug_logging(config["log_level"] == DEBUG)
+        self._log_level = config["log_level"]
+        update_settings = read_update_settings(config)
+        if update_settings != self._update_settings:
+            self.replace_update_checker(*update_settings)
+        self._update_settings = update_settings
+
+    def build_update_checker(self, enabled, interval_hours):
+        return UpdateChecker(self.on_update_state_change, interval_hours) if enabled else None
+
+    def replace_update_checker(self, enabled, interval_hours):
+        """Swap in a checker with the new settings, keeping the known state so a known update is not announced again; it checks at once only when the tray's checks have started."""
+        previous = self.update_checker
+        if previous:
+            previous.stop()
+        self.update_checker = self.build_update_checker(enabled, interval_hours)
+        if self.update_checker and previous:
+            self.update_checker.state = previous.state
+        if self.update_checker and self._update_checks_started:
+            self.update_checker.start()
+
     def report_config_error(self):
         """Log the full error with its source excerpt and notify its short form, which fits a notification."""
         logger.error(str(self.config_error))
-        self.show_notification("Invalid Config", self.config_error.summary)
+        keep_running = f"{KEEP_RUNNING} " if self.is_server_running else ""
+        self.show_notification("Invalid Config", f"{keep_running}{self.config_error.summary}")
 
     def validate_config(self, icon=None, item=None):
         """Re-read the config file and report the result, bringing the server controls back once it is fixed."""
@@ -446,17 +529,21 @@ class MCPTrayApp:
             self.show_notification("Config Valid", f"{get_config_file()} is valid.")
 
     def on_update_state_change(self, state):
-        """Refresh the menu after a background check and announce a newly found release."""
+        """Refresh the menu after a background check and announce a newly found release; a replaced checker's answer is dropped."""
+        if not self.update_checker or state is not self.update_checker.state:
+            return
         self.update_menu()
         if state.can_update:
             self.show_notification("Update Available", state.describe())
 
     def check_for_updates(self, icon=None, item=None):
         """Check PyPI on a worker thread so the menu stays responsive, then report the outcome."""
+        checker = self.update_checker
+
         def check():
-            self.update_checker.refresh()
+            checker.refresh()
             self.update_menu()
-            self.show_notification("Check for Updates", self.update_checker.state.describe())
+            self.show_notification("Check for Updates", checker.state.describe())
 
         threading.Thread(target=check, name="manual-update-check", daemon=True).start()
 
@@ -481,6 +568,7 @@ class MCPTrayApp:
                 self.start_server(daemon_mode=server_daemon_mode)
             return
         self.update_checker.stop()
+        self.config_watcher.stop()
         if self.icon:
             self.icon.stop()
 
@@ -542,12 +630,18 @@ class MCPTrayApp:
         self.server_controller.stop_servers()
 
     def restart_server(self):
-        """Restart the MCP server to reload configuration."""
+        """Restart with the config just checked, read once; one that cannot start is refused and the session keeps running."""
+        with self._redraw_lock:
+            self._restart_announced = True
         if self._read_config() is None:
             self.report_config_error()
             self.update_menu()
             return
-        self.server_controller.restart_servers()
+        refusal = find_restart_refusal(self.config_report.config)
+        if refusal:
+            self.show_error("Restart Refused", refusal)
+            return
+        self.server_controller.restart_servers(raw_config=self._raw_config)
 
     def open_config_file(self, icon=None, item=None):
         """Open the configuration file in the default text editor."""
@@ -637,7 +731,9 @@ class MCPTrayApp:
         except OSError as error:
             output, exit_code = str(error), None
         finally:
-            self.settings_running = False
+            with self._redraw_lock:
+                self._restart_announced = True
+                self.settings_running = False
         register_log_secrets(read_config_leniently())
         self._read_config()
         self.update_menu()
@@ -757,12 +853,12 @@ class MCPTrayApp:
         text = f"{title}: {message}"
         logger.error(text)
         if self.icon:
-            self.icon.notify(text if len(text) <= NOTIFICATION_LIMIT else text[:NOTIFICATION_LIMIT - 3] + "...", "Error")
+            self.icon.notify(fit_notification_text(text), "Error")
 
     def show_notification(self, title, message):
         """Show notification using the system tray."""
         logger.info(f"{title}: {message}")
-        self.platform.notify(self.icon, title, message)
+        self.platform.notify(self.icon, title, fit_notification_text(message))
 
     def update_menu(self):
         """Ask for a redraw on the thread the tray's platform draws on; a request made while one is still waiting is already covered by it, since that one reads the state when it runs."""
@@ -774,12 +870,12 @@ class MCPTrayApp:
         """Redraw the menu, icon and tooltip one at a time, so the last redraw shows the latest state; announce outside the lock, as a notification can take a while."""
         self._redraw_requested.release()
         with self._redraw_lock:
-            menu_items, dot, status, config_error_is_new = self.build_menu()
+            menu_items, dot, status, announce = self.build_menu()
             self.icon.menu = pystray.Menu(*menu_items)
             self.icon.icon = self.create_icon_image(dot)
             self.icon.title = self.format_tooltip(status)
-        if config_error_is_new:
-            self.report_config_error()
+        if announce:
+            announce()
 
     def quit_app(self, icon=None, item=None):
         """Quit the application."""
@@ -787,6 +883,7 @@ class MCPTrayApp:
             self.stop_server()
         if self.update_checker:
             self.update_checker.stop()
+        self.config_watcher.stop()
         if self.icon:
             self.icon.stop()
 
@@ -797,8 +894,12 @@ class MCPTrayApp:
         if self.config_error:
             self.report_config_error()
         self.report_update_result()
-        if self.update_checker:
-            self.update_checker.start()
+        with self._redraw_lock:
+            self._update_checks_started = True
+            checker = self.update_checker
+        if checker:
+            checker.start()
+        self.config_watcher.start()
 
     def run(self):
         """Start the tray application."""

@@ -59,6 +59,13 @@ def build_tray(tmp_path, servers_running=False):
     app.server_controller = MagicMock(is_running=servers_running)
     app.is_server_running = servers_running
     app.settings_running = False
+    app._redraw_lock = threading.Lock()
+    app._restart_announced = False
+    app._log_level = None
+    app._update_settings = None
+    app._update_checks_started = False
+    app._raw_config = None
+    app.config_watcher = MagicMock()
     app.settings = None
     app.config_error = None
     app.config_report = None

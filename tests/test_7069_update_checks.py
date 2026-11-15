@@ -138,7 +138,7 @@ def build_tray(update_check=True, state=None):
     """Create a tray app without touching the user's config or real servers."""
     bootstrap = {"deployment_url": "https://elitea.example.com", "auth_token": "token",
                  "update_check": update_check, "update_check_interval_hours": 24}
-    with patch.object(tray_module, "get_bootstrap_config", return_value=bootstrap), \
+    with patch.object(tray_module, "load_config", return_value=bootstrap), \
             patch.object(tray_module, "get_server_controller", return_value=MagicMock(daemon_mode=False)):
         app = tray_module.MCPTrayApp()
     if state is not None:
@@ -148,7 +148,7 @@ def build_tray(update_check=True, state=None):
 
 def menu_texts(app, bootstrap):
     """Render the menu and return the item labels."""
-    with patch.object(tray_module, "get_bootstrap_config", return_value=bootstrap):
+    with patch.object(tray_module, "load_config", return_value=bootstrap):
         return [item.text for item in app.get_menu_items()]
 
 

@@ -44,6 +44,7 @@ class ServerController:
         self.daemon_mode = False
         self.config = None
         self.skipped_servers = []
+        self.skipped_names = []
         self.supervisor: Optional[ServerSupervisor] = None
         self.server_callback: Optional[Callable[[str], None]] = None
         self.servers_changed_callback: Optional[Callable[[], None]] = None
@@ -102,7 +103,7 @@ class ServerController:
         self.last_error = message
         self._notify_error(message)
     
-    def start_servers(self, daemon_mode: bool = False) -> bool:
+    def start_servers(self, daemon_mode: bool = False, raw_config=None) -> bool:
         """Start MCP servers. Returns True if successful.
         
         Args:
@@ -112,7 +113,7 @@ class ServerController:
             return True
         self.last_error = None
             
-        raw_config = load_config()
+        raw_config = load_config() if raw_config is None else raw_config
         report = check_config(raw_config)
         write_config_schema()
         if report.config is None:
@@ -127,6 +128,7 @@ class ServerController:
             self._notify_error(report.summarize_skipped_servers(len(report.config["servers"]) + len(report.skipped_servers)))
         self.config = report.config
         self.skipped_servers = collect_skipped_servers(report, raw_config)
+        self.skipped_names = report.skipped_servers
         self.daemon_mode = daemon_mode
         
         if daemon_mode:
@@ -134,14 +136,14 @@ class ServerController:
         else:
             return self._start_embedded_servers()
 
-    def restart_servers(self) -> bool:
+    def restart_servers(self, raw_config=None) -> bool:
         """Restart MCP servers using the current daemon mode."""
         current_mode = self.daemon_mode
         if self.is_running:
             self.stop_servers()
             # Give a moment for resources to be released
             time.sleep(SERVER_RESTART_DELAY)
-        return self.start_servers(daemon_mode=current_mode)
+        return self.start_servers(daemon_mode=current_mode, raw_config=raw_config)
     
     def _start_daemon_servers(self) -> bool:
         """Start MCP servers as a separate daemon process."""

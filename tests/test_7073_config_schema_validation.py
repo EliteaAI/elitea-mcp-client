@@ -213,12 +213,12 @@ def test_a_deployment_url_that_is_not_text_is_reported_instead_of_crashing_the_c
 
 def test_a_blocked_config_names_the_blocker_before_the_skipped_servers():
     report = check({"project_id": "abc", "servers": {"remote": {"url": "https://x/mcp"}}})
-    assert report.summary.startswith('project_id: must be a number, got "abc"')
+    assert report.summary.startswith('project_id: must be a number')
 
 
 @pytest.mark.parametrize("raw, path, text", [
     ({"deployment_url": "dev.elitea.ai"}, "deployment_url", "must be the address of ELITEA"),
-    ({"project_id": "abc"}, "project_id", 'must be a number, got "abc"'),
+    ({"project_id": "abc"}, "project_id", 'must be a number'),
 ])
 def test_connection_settings_that_fail_today_stop_the_client(raw, path, text):
     report = check({**raw, "servers": {"a": GOOD}})

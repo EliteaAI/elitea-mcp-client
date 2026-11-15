@@ -1,7 +1,7 @@
 import asyncio
 import threading
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -16,6 +16,8 @@ from src.elitea_mcp.utils.server_supervisor import ServerSupervisor
 from src.elitea_mcp.utils.session_manager import SessionManager
 from src.elitea_mcp.utils.sio import start_socket_connection
 from tests.test_7070_platform_registration import create_registry, drop_platform, find_free_port, serve_platform, wait_until
+
+RUN_CONFIG = tray_module.check_config({"servers": {"github": {"command": "github"}}, "timeout": 30}).config
 
 STOPPED = "MCP servers stopped"
 RUN_CONTROLS = ["Stop MCP Server", "Restart MCP Server"]
@@ -219,7 +221,8 @@ def tray(session):
             patch.object(tray_module, "UpdateChecker"):
         app = tray_module.MCPTrayApp()
     app._read_config = MagicMock(return_value={"deployment_url": "http://127.0.0.1:9", "auth_token": "token"})
-    app.config_report = MagicMock(notable=[])
+    app.config_report = MagicMock(notable=[], skipped_servers=[])
+    type(app.config_report).config = PropertyMock(side_effect=lambda: session.controller.config)
     app.show_notification = MagicMock()
     app.show_error = MagicMock()
     app.icon = MagicMock()
@@ -231,7 +234,7 @@ def run_controls(app):
 
 
 def test_an_error_from_a_live_session_keeps_the_stop_and_restart_controls(tray, session):
-    session.controller.config = {"servers": {"github": {}}, "timeout": 30}
+    session.controller.config = RUN_CONFIG
     session.controller._start_embedded_servers()
     wait_until(lambda: session.end_session is not None)
 
@@ -242,7 +245,7 @@ def test_an_error_from_a_live_session_keeps_the_stop_and_restart_controls(tray, 
 
 
 def test_start_works_again_once_the_platform_ended_the_session(tray, session):
-    session.controller.config = {"servers": {"github": {}}, "timeout": 30}
+    session.controller.config = RUN_CONFIG
     session.controller._start_embedded_servers()
     wait_until(lambda: session.end_session is not None)
     first_end_session = session.end_session

@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import re
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Annotated, Any, Literal, Optional, Union
@@ -119,7 +120,7 @@ def parse_timeout_seconds(value, info: ValidationInfo):
 
 
 def parse_check_interval_hours(value, info: ValidationInfo):
-    """Accept what float() accepts; fall back with a warning on anything that is not a finite number, and hold a positive interval to an hour so a typo cannot flood PyPI."""
+    """Accept what float() accepts; fall back with a warning on anything that is not a finite number, hold a positive interval to an hour so a typo cannot flood PyPI, and to the longest wait the platform allows (about 1193 hours on Windows)."""
     try:
         hours = float(value) if not isinstance(value, bool) else math.nan
     except (TypeError, ValueError, OverflowError):
@@ -131,6 +132,11 @@ def parse_check_interval_hours(value, info: ValidationInfo):
     if 0 < hours < 1:
         add_field_problem(info, Severity.WARNING, info.field_name, "is less than 1 hour, so 1 is used.")
         return 1
+    longest = threading.TIMEOUT_MAX // 3600
+    if hours > longest:
+        add_field_problem(info, Severity.WARNING, info.field_name,
+                          f"is more hours than this computer can wait between checks, so {int(longest)} is used.")
+        return longest
     return hours
 
 

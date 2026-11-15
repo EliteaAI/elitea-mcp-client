@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.elitea_mcp import config as config_module
+from src.elitea_mcp import config_model as config_model_module
 from src.elitea_mcp import tray as tray_module
 from src.elitea_mcp.utils import package_updates
 from src.elitea_mcp.utils import server_controller as controller_module
@@ -439,3 +440,19 @@ def test_the_tray_starts_watching_once_it_is_ready(config_file, no_pypi):
     app.update_checker = None
     app._on_tray_ready(MagicMock())
     app.config_watcher.start.assert_called_once_with()
+
+
+def test_an_interval_longer_than_windows_can_wait_is_held_to_its_limit(monkeypatch):
+    monkeypatch.setattr(config_model_module.threading, "TIMEOUT_MAX", 4294967.0)
+    held = tray_module.check_config({"update_check_interval_hours": 2160})
+    kept = tray_module.check_config({"update_check_interval_hours": 1193})
+    assert held.config["update_check_interval_hours"] == 1193
+    assert [p.path for p in held.notable] == ["update_check_interval_hours"]
+    assert kept.config["update_check_interval_hours"] == 1193 and kept.notable == []
+
+
+def test_the_longest_interval_is_a_wait_this_platform_accepts():
+    hours = tray_module.check_config({"update_check_interval_hours": 10 ** 9}).config["update_check_interval_hours"]
+    lock = threading.Lock()
+    assert lock.acquire(timeout=hours * 3600)
+    lock.release()

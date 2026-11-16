@@ -50,6 +50,9 @@ UV_VALUE_FLAGS = frozenset({"--directory", "--project", "--with", "--python", "-
 VALUE_FLAGS = {"docker": CONTAINER_VALUE_FLAGS, "podman": CONTAINER_VALUE_FLAGS, "uv": UV_VALUE_FLAGS, "uvx": UV_VALUE_FLAGS,
                "npx": frozenset({"--registry", "--cache", "--userconfig"})}
 WINDOWS_SHELL_FLAGS = frozenset({"/c", "/k", "/s", "/q"})
+SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&"})
+SHELL_WRAPPERS = frozenset({"exec", "nohup", "time", "command", "builtin"})
+ASSIGNMENT_KEYWORDS = frozenset({"export", "set"})
 LAUNCHER_SUFFIXES = (".exe", ".cmd", ".bat")
 PACKAGE_SHAPE = re.compile(r"(?:[a-z0-9][a-z0-9.-]*(?::\d{1,5})?/)?(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*"
                            r"(?:/[a-z0-9][a-z0-9._~-]*)*(?:@[\w.^~<>=*-]+|:[\w.-]+)?")
@@ -399,11 +402,50 @@ def project_args(key, value, hidden, owner):
     return mask_args(value, owner.get("command"), owner.get("cwd"), hidden)
 
 
-def hide_command_line(value, hidden):
-    """A server written as one command line: masked whole, with each of its values remembered as its args would be."""
-    if isinstance(value, str) and (words := split_args(value)):
-        mask_args(words[1:], words[0], None, hidden)
+def hide_command_line(value, hidden, cwd=None):
+    """A command line written as one string, a whole server or the script after `cmd /c` or `sh -c`: masked whole, with each of its values remembered as its args would be."""
+    words = split_script(value) if isinstance(value, str) else []
+    if len(words) > 1:
+        for segment in split_shell_segments(words):
+            prefix, rest = split_launcher(segment)
+            for word in prefix:
+                name, separator, assigned = word.partition("=")
+                if separator and not is_plain_setting(name, assigned):
+                    hide_all(assigned, hidden, is_credential_name(name))
+            if rest:
+                mask_args(rest[1:], rest[0], cwd, hidden)
     return hide_all(value, hidden, False)
+
+
+def split_script(text):
+    """A script's words with &&, ||, ;, | and & apart even when written against a word, as the shell reads them; quoted ones stay inside their word."""
+    lexer = shlex.shlex(text, posix=True, punctuation_chars="&|;")
+    lexer.whitespace_split, lexer.escape, lexer.commenters = True, "", ""
+    try:
+        return list(lexer)
+    except ValueError:
+        return text.split()
+
+
+def split_shell_segments(words):
+    """The commands a shell script chains with &&, ||, ;, | or &, so each one is read from its own launcher."""
+    segments = [[]]
+    for word in words:
+        if word in SHELL_SEPARATORS:
+            segments.append([])
+        else:
+            segments[-1].append(word)
+    return [segment for segment in segments if segment]
+
+
+def split_launcher(words):
+    """A shell command's env prefix and wrappers such as `exec` or `nohup`, and `export`/`set` ahead of the assignments they carry, apart from the launcher and its args."""
+    prefix, rest = split_env_prefix(words)
+    while rest and (rest[0] in SHELL_WRAPPERS or rest[0].lower() in ASSIGNMENT_KEYWORDS):
+        prefix.append(rest.pop(0))
+        more, rest = split_env_prefix(rest)
+        prefix.extend(more)
+    return prefix, rest
 
 
 def split_args(text):
@@ -561,9 +603,11 @@ def mask_flag(arg, cwd, hidden):
 
 
 def mask_container_env(arg, hidden):
-    """`-e NAME` passes a value from the environment and names no secret; `-e NAME=VALUE` keeps the name only."""
+    """`-e NAME` passes a value from the environment and names no secret; `-e NAME=VALUE` keeps the name only, unless the value is a plain setting as in env."""
     name, separator, value = arg.partition("=")
-    return f"{name}={hide_all(value, hidden, True)}" if separator else arg
+    if not separator or is_plain_setting(name, value):
+        return arg
+    return f"{name}={hide_all(value, hidden, True)}"
 
 
 def mask_value(value, cwd, hidden):
@@ -574,7 +618,7 @@ def mask_value(value, cwd, hidden):
         return redact_urls(mask_url_secrets(value))
     if is_existing_path(value, cwd):
         return value
-    return hide_all(value, hidden, False)
+    return hide_command_line(value, hidden, cwd)
 
 
 def is_package(arg):

@@ -5,15 +5,23 @@ from pathlib import Path
 
 import pytest
 
-from src.elitea_mcp.utils import client_identity
+from src.elitea_mcp.utils import client_identity as src_client_identity
+from src.elitea_mcp.utils import single_instance as src_single_instance
 from src.elitea_mcp.utils import logging_setup as src_logging_setup
+from elitea_mcp.utils import client_identity
+from elitea_mcp.utils import single_instance
 from elitea_mcp.utils import logging_setup
 
 
 @pytest.fixture(autouse=True)
 def keep_client_id_out_of_the_real_config_dir(tmp_path, monkeypatch):
-    """Every test that reaches the platform reads the client id; keep it in a temporary folder."""
-    monkeypatch.setattr(client_identity, "get_config_dir", lambda: tmp_path)
+    """Every test that reaches the platform reads the client id, and every tray or `serve` takes its lock; keep both in a temporary folder and let go of the lock after the test."""
+    for module in (client_identity, src_client_identity):
+        monkeypatch.setattr(module, "get_config_dir", lambda: tmp_path)
+        monkeypatch.setattr(module, "_lock_skipped", False)
+    yield
+    for module in (single_instance, src_single_instance):
+        module.release_instance()
 
 
 @pytest.fixture(autouse=True)

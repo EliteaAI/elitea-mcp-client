@@ -20,6 +20,7 @@ CLIENT_ID_LOCK_NAME = "client_id.lock"
 MACHINE_PART_LENGTH = 12
 RANDOM_NODE_BIT = 1 << 40
 _held_locks = {}
+_lock_skipped = False
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ def load_client_id():
     config_dir = get_config_dir()
     path = config_dir / CLIENT_ID_FILE_NAME
     machine = read_machine_part()
-    if not hold_lock(config_dir / CLIENT_ID_LOCK_NAME):
+    if _lock_skipped or not hold_lock(config_dir / CLIENT_ID_LOCK_NAME):
         return f"{machine}-{uuid.uuid4()}"
     try:
         stored = path.read_text(encoding="utf-8").strip()
@@ -68,6 +69,31 @@ def hold_lock(path):
         return False
     _held_locks[str(path)] = handle
     return True
+
+
+def skip_lock():
+    """An extra copy started with --allow-multiple never takes client_id.lock, so the copy that holds it, or starts later, keeps it."""
+    global _lock_skipped
+    _lock_skipped = True
+
+
+def is_lock_skipped():
+    return _lock_skipped
+
+
+def keep_until_exit(path, handle):
+    """Keep a lock taken elsewhere for the rest of this process, where hold_lock finds it already held."""
+    _held_locks[str(path)] = handle
+
+
+def is_held_here(path):
+    return str(path) in _held_locks
+
+
+def release_held_lock(path):
+    handle = _held_locks.pop(str(path), None)
+    if handle is not None:
+        release_lock(handle)
 
 
 def lock_exclusively(handle):

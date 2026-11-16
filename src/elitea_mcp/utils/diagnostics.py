@@ -19,6 +19,7 @@ from .server_loader import collect_secret_values, load_servers, mask_secrets, re
 from .server_registry import DECLINED, FAILED, HEALTHY, ServerEntry
 from .server_supervisor import collect_skipped_servers, format_error_report
 from .session_status import read_running_session
+from .single_instance import UNAVAILABLE, find_holder, get_lock_path
 
 REPORT_TITLE = "ELITEA MCP doctor"
 DOCTOR_HINT = "Run elitea-mcp doctor for a full check."
@@ -207,7 +208,19 @@ def write_server_details(context, load):
 
 def check_environment(context):
     return ([check_port(context)] if context.config is not None else []) + check_running_client(context) + [
-        ok("Logs", str(context.error_dir))]
+        check_instance(), ok("Logs", str(context.error_dir))]
+
+
+def check_instance():
+    """The tray or `serve` that holds the instance lock, so a frozen one can be told apart from none."""
+    holder = find_holder()
+    if holder is UNAVAILABLE:
+        return warn("Instance", f"unknown (cannot lock {get_lock_path()})")
+    if holder is None:
+        return ok("Instance", "none")
+    if holder.pid is None:
+        return ok("Instance", "running (PID unknown)")
+    return ok("Instance", f"running (PID {holder.pid}, {holder.command})")
 
 
 def check_port(context):

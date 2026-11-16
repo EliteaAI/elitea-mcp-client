@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 
+from . import client_identity
 from .package_updates import package_name
 from . import update_helper
 from .update_helper import spawn_detached
@@ -123,8 +124,8 @@ def resolve_upgrade_plan(prefix=sys.prefix, base_prefix=sys.base_prefix, executa
 
 
 def build_relaunch_command():
-    """Start the tray again from the same environment; the helper already runs it detached."""
-    return [sys.executable, "-m", "elitea_mcp.main", "tray"]
+    """Start the tray again from the same environment, still as an extra copy when it was one; the helper already runs it detached."""
+    return [sys.executable, "-m", "elitea_mcp.main", "tray", *(["--allow-multiple"] if client_identity.is_lock_skipped() else [])]
 
 
 def start_update_helper(plan, current, target, servers_were_running, server_daemon_mode, paths):

@@ -60,6 +60,7 @@ WEB_URL = re.compile(r"(?:git\+)?https?://[^\s/?#]")
 ANY_SCHEME_URL = re.compile(r"[a-zA-Z][\w+.-]*://\S+")
 GENERATED_PATH_SEGMENT = re.compile(r"(?=[^/]*\d)[^/]{8,}")
 NAMED_VALUE = re.compile(r"\s{0,8}([\w.-]{1,64})\s{0,8}[:=]\s{0,8}(.+)", re.DOTALL)
+ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
 CREDENTIAL_SCHEMES = ("bearer", "basic", "token")
 
 KEY_PARTS = (r"(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|apikey|credential|private[_-]?key|access[_-]?key|cookie"
@@ -187,24 +188,56 @@ def collect_logs(sources):
         return [BundleEntry("logs/README.txt", "log folder unavailable: it could not be found or created\n")]
     entries, summary = [], []
     for paths, budget, wrapped in list_log_families(log_files):
-        left = budget
-        for path in paths:
-            if left <= 0 or not path.is_file():
-                continue
-            try:
-                text, size = read_tail(path, left)
-            except OSError as error:
-                summary.append(f"{path}: skipped ({type(error).__name__})")
-                continue
-            kept = min(len(text.encode("utf-8")), left)
-            left -= kept
-            entries.append(BundleEntry(name_log_member(log_files, path), text, kept, wrapped))
-            summary.append(f"{path}: kept {kept} of {size} bytes")
+        tails = read_family(paths, budget, summary)
+        if wrapped:
+            tails = move_continuations_to_their_heads(tails)
+        entries.extend(BundleEntry(name_log_member(log_files, path), text, kept, wrapped) for path, text, kept, _ in tails)
     folders = sorted({str(log_files.folder), *([str(log_files.own_log.parent)] if log_files.own_log else [])})
     header = [f"Logs were looked for in: {', '.join(folders)}"]
     if not entries:
         header.append(f"no log files found in {', '.join(folders)}")
     return entries + [BundleEntry("logs/README.txt", "\n".join(header + summary) + "\n")]
+
+
+def read_family(paths, budget, summary):
+    """The tail of each file of a family, newest first, while their shared budget lasts."""
+    tails, left = [], budget
+    for path in paths:
+        if left <= 0 or not path.is_file():
+            continue
+        try:
+            text, size = read_tail(path, left)
+        except OSError as error:
+            summary.append(f"{path}: skipped ({type(error).__name__})")
+            continue
+        cut = size > left
+        kept = min(len(text.encode("utf-8")), left)
+        left -= kept
+        tails.append((path, text, kept, cut))
+        summary.append(f"{path}: kept {kept} of {size} bytes")
+    return tails
+
+
+def move_continuations_to_their_heads(tails):
+    """A file that starts mid-record after a rotation gives those lines to the older file holding the record's head; after a cut, or when that file is not in the bundle, the head is gone and they are dropped: a secret split across two files is never masked half by half."""
+    moved = list(tails)
+    for index in range(len(moved)):
+        path, text, kept, cut = moved[index]
+        lines = text.split("\n")
+        count = next((number for number, line in enumerate(lines) if not is_wrap_continuation(line)), len(lines))
+        if not count:
+            continue
+        orphans = "".join(f"{line}\n" for line in lines[:count])
+        moved[index] = (path, "\n".join(lines[count:]), max(0, kept - len(orphans.encode("utf-8"))), cut)
+        if not cut and index + 1 < len(moved) and moved[index + 1][0] == next_rotation(path):
+            older, older_text, older_kept, older_cut = moved[index + 1]
+            moved[index + 1] = (older, older_text + orphans, older_kept + len(orphans.encode("utf-8")), older_cut)
+    return moved
+
+
+def next_rotation(path):
+    stem, _, number = path.name.rpartition(".")
+    return path.with_name(f"{stem}.{int(number) + 1}" if number.isdigit() else f"{path.name}.1")
 
 
 def list_log_families(log_files):
@@ -325,6 +358,38 @@ def project_servers(key, value, hidden, owner):
             for name, server in value.items()}
 
 
+def keep_command(key, value, hidden, owner):
+    """A command line pasted into "command" keeps its launcher and package, and any shell env prefix its names, with every value masked as args would be."""
+    words = split_args(value) if isinstance(value, str) else []
+    prefix, rest = split_env_prefix(words)
+    if len(words) < 2 or (not prefix and is_program_path(value, owner.get("cwd"))):
+        return keep(key, value, hidden, owner)
+    masked_prefix = [mask_container_env(word, hidden) if ENV_ASSIGNMENT.fullmatch(word) else word for word in prefix]
+    masked_rest = [rest[0], *mask_args(rest[1:], rest[0], owner.get("cwd"), hidden)] if rest else []
+    combined = [*masked_prefix, *masked_rest]
+    if combined == words:
+        return value
+    hidden.append(value)
+    return " ".join(str(word) for word in combined)
+
+
+def split_env_prefix(words):
+    """Leading NAME=VALUE assignments pasted from a shell snippet, and a bare `env` ahead of them."""
+    prefix, rest = [], list(words)
+    if rest and rest[0] == "env":
+        prefix.append(rest.pop(0))
+    while rest and ENV_ASSIGNMENT.fullmatch(rest[0]):
+        prefix.append(rest.pop(0))
+    return prefix, rest
+
+
+def is_program_path(value, cwd):
+    """One program with spaces in its path: found as Windows finds it, as written or with .exe/.cmd/.bat added, or a Windows program from another machine whose every space is inside the path."""
+    if any(is_existing_path(value + suffix, cwd) for suffix in ("", *LAUNCHER_SUFFIXES)):
+        return True
+    return value.lower().endswith(LAUNCHER_SUFFIXES) and all("\\" in word or "/" in word for word in value.split()[1:])
+
+
 def project_args(key, value, hidden, owner):
     if isinstance(value, str):
         mask_args(split_args(value), owner.get("command"), owner.get("cwd"), hidden)
@@ -342,8 +407,11 @@ def hide_command_line(value, hidden):
 
 
 def split_args(text):
+    """Words exactly as written, quotes removed: shlex's escapes would drop the backslashes of a Windows path or a password, and the doctor and logs echo the raw text."""
+    lexer = shlex.shlex(text, posix=True)
+    lexer.whitespace_split, lexer.escape, lexer.commenters = True, "", ""
     try:
-        return shlex.split(text)
+        return list(lexer)
     except ValueError:
         return text.split()
 
@@ -358,7 +426,7 @@ CONFIG_RULES = {
     "update_check_interval_hours": keep, "log_level": keep, "servers": project_servers, "mcpServers": project_servers,
 }
 SERVER_RULES = {
-    "type": keep, "command": keep, "args": project_args, "env": hide_env_values, "cwd": keep, "encoding": keep,
+    "type": keep, "command": keep_command, "args": project_args, "env": hide_env_values, "cwd": keep, "encoding": keep,
     "encoding_error_handler": keep, "url": keep_host, "headers": hide_header_values, "stateful": keep,
     "startup_timeout": keep,
 }
@@ -380,7 +448,21 @@ def remember(value, hidden, credential):
     """A short masked value is remembered only when its name says credential, so that "stdio" or "run" stay readable in the logs."""
     if len(value) >= LONG_SECRET_LENGTH or (credential and len(value) >= MIN_SECRET_LENGTH):
         hidden.append(value)
+    assigned = find_assigned_secret(value)
+    if assigned:
+        hidden.append(assigned)
     hidden.extend(list_secret_parts(value))
+
+
+def find_assigned_secret(value):
+    """The value of NAME=VALUE when it may be a secret on its own: long, not a package-style word and not a path here; NAME:VALUE is a mapping such as a docker volume."""
+    named = NAMED_VALUE.fullmatch(value)
+    if named is None or value[named.end(1):named.start(2)].strip() != "=":
+        return None
+    assigned = named.group(2).strip()
+    if len(assigned) < LONG_SECRET_LENGTH or is_package(assigned) or is_existing_path(assigned, None):
+        return None
+    return assigned
 
 
 def iterate_leaves(value):
@@ -502,12 +584,12 @@ def is_package(arg):
 def is_existing_path(value, cwd):
     if not any(mark in value for mark in ("/", "\\")) and not value.startswith(("~", ".")):
         return False
-    path = Path(value).expanduser()
-    if not path.is_absolute() and isinstance(cwd, str):
-        path = Path(cwd).expanduser() / path
     try:
+        path = Path(value).expanduser()
+        if not path.is_absolute() and isinstance(cwd, str):
+            path = Path(cwd).expanduser() / path
         return path.exists()
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
         return False
 
 
@@ -624,12 +706,16 @@ def rejoin_wrapped_lines(lines):
     """Server output wrapped at 80 columns continues on a record whose message starts with a run of spaces: put it back on one line so a split secret is whole again."""
     joined = []
     for line in lines:
-        marker = line.find("] ")
-        if joined and marker != -1 and line[marker + 2:].startswith(WRAP_INDENT):
-            joined[-1] = joined[-1].rstrip() + line[marker + 2:].strip()
+        if joined and is_wrap_continuation(line):
+            joined[-1] = joined[-1].rstrip() + line[line.find("] ") + 2:].strip()
         else:
             joined.append(line)
     return joined
+
+
+def is_wrap_continuation(line):
+    marker = line.find("] ")
+    return marker != -1 and line[marker + 2:].startswith(WRAP_INDENT)
 
 
 def mask_credential_patterns(text):

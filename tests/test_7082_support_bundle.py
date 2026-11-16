@@ -282,6 +282,265 @@ def test_a_secret_folded_by_rich_across_server_output_records_is_masked_whole(fo
     assert canary(34, False) not in member and "https://api.telegram.org" in member
 
 
+SERVER_OUTPUT_PREFIX = "2026-11-16 10:00:00,000 - elitea_mcp.server_output - INFO - [srv] "
+
+
+def write_split_secret_logs(log_dir, config_file, files):
+    secret = "Zq7Kp2Lm9Xw4Rt6Yv8Nb3Hc5Jd1Fg0Se"
+    config_file.write_text(json.dumps({"servers": {"srv": {"command": "npx", "env": {"API_KEY": secret}}}}), encoding="utf-8")
+    head = f"{SERVER_OUTPUT_PREFIX}[11/16/26 10:00:00] INFO     Calling upstream with key {secret[:14]}"
+    continuation = f"{SERVER_OUTPUT_PREFIX}{' ' * 20}{secret[14:]} and more text"
+    for name, text in files(head, continuation).items():
+        (log_dir / name).write_text(text)
+    return secret
+
+
+def test_a_secret_split_by_a_rotation_between_two_files_is_masked_whole(folders, leaky_doctor):
+    log_dir, config_file = folders
+    secret = write_split_secret_logs(log_dir, config_file, lambda head, continuation: {
+        "elitea-mcp-tray-servers.log.1": f"filler\n{head}\n", "elitea-mcp-tray-servers.log": f"{continuation}\n"})
+
+    members = read_members(export(config_file, log_dir))
+
+    servers_logs = members["logs/elitea-mcp-tray-servers.log"] + members["logs/elitea-mcp-tray-servers.log.1"]
+    assert secret[:14].encode() not in servers_logs and secret[14:].encode() not in servers_logs
+    assert b"Calling upstream with key ****" in members["logs/elitea-mcp-tray-servers.log.1"]
+
+
+def test_a_continuation_whose_head_was_cut_off_is_dropped_not_moved_to_the_older_file(folders, leaky_doctor):
+    log_dir, config_file = folders
+
+    def files(head, continuation):
+        lead = len(head) + 1 + len(continuation) + 1
+        line = f"{SERVER_OUTPUT_PREFIX}ordinary record\n"
+        filler = line * ((SERVER_LOG_BUDGET + 10 - lead) // len(line) + 1)
+        current = f"{head}\n{continuation}\n{filler}"
+        cut_at = len(current) - SERVER_LOG_BUDGET
+        assert 0 < cut_at < len(head)
+        return {"elitea-mcp-tray-servers.log": current, "elitea-mcp-tray-servers.log.1": "older record\n"}
+    secret = write_split_secret_logs(log_dir, config_file, files)
+
+    members = read_members(export(config_file, log_dir))
+
+    assert members["logs/elitea-mcp-tray-servers.log.1"] == b"older record\n"
+    servers_logs = members["logs/elitea-mcp-tray-servers.log"] + members["logs/elitea-mcp-tray-servers.log.1"]
+    assert secret[14:].encode() not in servers_logs and secret[:14].encode() not in servers_logs
+
+
+def test_a_continuation_whose_head_is_not_in_the_bundle_is_dropped(folders, leaky_doctor):
+    log_dir, config_file = folders
+    secret = write_split_secret_logs(log_dir, config_file, lambda head, continuation: {
+        "elitea-mcp-tray-servers.log.3": f"{continuation}\nlater line\n"})
+
+    member = read_members(export(config_file, log_dir))["logs/elitea-mcp-tray-servers.log.3"]
+
+    assert member == b"later line\n"
+    assert secret[14:].encode() not in member
+
+
+def test_a_command_line_pasted_into_command_is_masked_like_args(folders, leaky_doctor):
+    log_dir, config_file = folders
+    secret = canary(35, False)
+    config_file.write_text(json.dumps({"servers": {
+        "smith": {"command": f"npx -y @smithery/cli@latest run @acme/srv --key {secret}"},
+        "windows": {"command": "C:\\Program Files\\nodejs\\npx.cmd", "args": ["-y", "pkg"]},
+        "plain": {"command": "/usr/local/bin/node", "args": ["x.js"]},
+    }}), encoding="utf-8")
+    (log_dir / "elitea-mcp-tray.log").write_text(f'command "npx -y @smithery/cli@latest run @acme/srv --key {secret}" not found\n')
+
+    members = read_members(export(config_file, log_dir))
+
+    servers = json.loads(members["config.masked.json"])["servers"]
+    assert servers["smith"]["command"] == "npx -y @smithery/cli@latest **** **** --key ****"
+    assert servers["windows"]["command"] == "C:\\Program Files\\nodejs\\npx.cmd"
+    assert servers["plain"]["command"] == "/usr/local/bin/node"
+    assert not [found for found in find_canary_cores(members) if found[1] == secret]
+    assert b'command "****" not found' in members["logs/elitea-mcp-tray.log"]
+
+
+def test_an_arg_that_looks_like_another_users_home_does_not_stop_the_export(tmp_path, folders, cli_paths, leaky_doctor):
+    _, config_file = folders
+    config_file.write_text(json.dumps({"servers": {"fs": {"command": "npx", "args": [
+        "-y", "@modelcontextprotocol/server-filesystem", "--exclude", "~$*.docx", "~nosuchuser7082/x"],
+        "cwd": "~nosuchuser7082"}}}), encoding="utf-8")
+
+    main_module.support_bundle(str(tmp_path), str(config_file))
+
+    args = json.loads(read_members(next(tmp_path.glob("elitea-mcp-support-*.zip")))["config.masked.json"])["servers"]["fs"]["args"]
+    assert args == ["-y", "@modelcontextprotocol/server-filesystem", "--exclude", "****", "****"]
+
+
+def test_an_installed_program_with_spaces_in_its_path_is_kept_whole_even_without_its_suffix(tmp_path):
+    program = tmp_path / "Program Files" / "nodejs" / "node"
+    program.parent.mkdir(parents=True)
+    program.with_suffix(".exe").write_text("")
+    (program.parent / "npx.cmd").write_text("")
+
+    for command in (str(program), str(program.parent / "npx.cmd")):
+        servers = support_bundle.project_config({"servers": {"w": {"command": command, "args": ["x.js"]}}}, [])["servers"]
+        assert servers["w"]["command"] == command
+
+
+@pytest.mark.parametrize("command", ["C:\\Program Files\\nodejs\\npx.cmd", "C:/Program Files/nodejs/node.exe"])
+def test_a_windows_program_from_another_machine_is_kept_by_its_suffix(command):
+    servers = support_bundle.project_config({"servers": {"w": {"command": command, "args": ["x.js"]}}}, [])["servers"]
+
+    assert servers["w"]["command"] == command
+
+
+def test_a_missing_suffixless_program_with_spaces_is_masked_after_its_first_word():
+    servers = support_bundle.project_config({"servers": {"w": {"command": "C:\\Program Files\\nodejs\\node"}}}, [])["servers"]
+
+    assert servers["w"]["command"] == "C:\\Program ****"
+
+
+@pytest.mark.parametrize("command, expected, secret", [
+    ("C:\\node\\node.exe C:\\srv\\index.js ghp_abcdefghijklmnop1234", "C:\\node\\node.exe **** ****", "ghp_abcdefghijklmnop1234"),
+    ("C:\\a\\run.exe sekretvalue99 C:\\b\\c", "C:\\a\\run.exe **** ****", "sekretvalue99"),
+    ("D:/tools/server serve sekritvalue99", "D:/tools/server **** ****", "sekritvalue99"),
+    ("C:\\a\\run.exe Zq7Kp2Lm/9Xw4Rt6Yv8Nb3Hc+5Jd1Fg0Se==", "C:\\a\\run.exe ****", "Zq7Kp2Lm/9Xw4Rt6Yv8Nb3Hc+5Jd1Fg0Se=="),
+    ('C:\\x\\node.exe s.js --token "Zq7Kp2Lm9Xw4Rt6Yv8Nb"', "C:\\x\\node.exe s.js --token ****", "Zq7Kp2Lm9Xw4Rt6Yv8Nb"),
+    ('"C:\\Program Files\\nodejs\\node.exe" s.js --token "Zq7Kp2Lm9Xw4Rt6Yv8Nb"',
+     "C:\\Program Files\\nodejs\\node.exe s.js --token ****", "Zq7Kp2Lm9Xw4Rt6Yv8Nb"),
+])
+def test_a_windows_command_line_keeps_its_program_and_masks_its_values(command, expected, secret):
+    hidden = []
+
+    servers = support_bundle.project_config({"servers": {"w": {"command": command}}}, hidden)["servers"]
+
+    assert servers["w"]["command"] == expected
+    assert secret in hidden
+
+
+@pytest.mark.parametrize("command, bare", [
+    ('C:\\tools\\srv.exe --api-key="Zq7Kp2Lm9Xw4Rt6Yv8Nb3Hc"', "Zq7Kp2Lm9Xw4Rt6Yv8Nb3Hc"),
+    ('C:\\t\\srv.exe -e K="Zq7Kp2Lm9Xw4Rt6Yv8"', "Zq7Kp2Lm9Xw4Rt6Yv8"),
+    ('"C:\\Program Files\\x\\srv.exe" --token ab\\cdEFGHIJ12345', "ab\\cdEFGHIJ12345"),
+])
+def test_a_quoted_or_escaped_windows_value_is_remembered_bare_and_masked_in_the_logs(folders, leaky_doctor, command, bare):
+    log_dir, config_file = folders
+    config_file.write_text(json.dumps({"servers": {"w": {"command": command}}}), encoding="utf-8")
+    (log_dir / "elitea-mcp-tray-servers.log").write_text(f"{SERVER_OUTPUT_PREFIX}using {bare}\n")
+    hidden = []
+
+    support_bundle.project_config(json.loads(config_file.read_text()), hidden)
+    member = read_members(export(config_file, log_dir))["logs/elitea-mcp-tray-servers.log"].decode()
+
+    assert bare in hidden
+    assert member == f"{SERVER_OUTPUT_PREFIX}using ****\n"
+
+
+@pytest.mark.parametrize("server", [
+    {"command": "uvx srv --password p@ss\\w0rd!!"},
+    {"command": "npx -y pkg sekret\\value99xx"},
+    "uvx srv --password p@ss\\w0rd!!",
+])
+def test_a_backslash_secret_in_a_pasted_command_line_is_masked_where_the_doctor_and_logs_echo_it(folders, server):
+    log_dir, config_file = folders
+    raw = server["command"] if isinstance(server, dict) else server
+    secret = raw.split()[-1]
+    config_file.write_text(json.dumps({"servers": {"w": server}}), encoding="utf-8")
+    (log_dir / "elitea-mcp-tray.log").write_text(f'command "{raw}" not found\n')
+
+    def doctor(context, on_results=None):
+        support_bundle.read_config(context)
+        return [fail('Local server "w" (stdio)', f'command "{raw}" not found')]
+    with patch.object(support_bundle, "run_checks", side_effect=doctor):
+        members = read_members(export(config_file, log_dir))
+
+    assert secret.encode() not in members["doctor.txt"] and secret.encode() not in members["logs/elitea-mcp-tray.log"]
+    assert secret.encode() not in members["config.masked.json"]
+
+
+def test_a_named_value_is_remembered_bare_unless_it_looks_like_a_package_name():
+    hidden = []
+
+    mask_args(["s.js", "transport=streamable-http", "NODE_ENV=production", "HOST=127.0.0.1", "X=Zq7K/p2+Lm9X=w4Rt6Yv8"],
+              "node", None, hidden)
+
+    assert {"streamable-http", "production", "127.0.0.1"}.isdisjoint(hidden)
+    assert "Zq7K/p2+Lm9X=w4Rt6Yv8" in hidden
+
+
+@pytest.mark.parametrize("command", ["mysql-mcp -u root -p Rt5/x+", "npx -y @acme/db-mcp --pw Rt5/x+"])
+def test_a_short_value_in_a_pasted_command_line_is_masked_where_the_doctor_and_logs_echo_it(folders, command):
+    log_dir, config_file = folders
+    config_file.write_text(json.dumps({"servers": {"w": {"command": command}}}), encoding="utf-8")
+    (log_dir / "elitea-mcp-tray.log").write_text(f'command "{command}" not found\n')
+
+    def doctor(context, on_results=None):
+        support_bundle.read_config(context)
+        return [fail('Local server "w" (stdio)', f'command "{command}" not found')]
+    with patch.object(support_bundle, "run_checks", side_effect=doctor):
+        members = read_members(export(config_file, log_dir))
+
+    for name in ("doctor.txt", "logs/elitea-mcp-tray.log", "config.masked.json"):
+        assert b"Rt5/x+" not in members[name], name
+    assert b'command "****" not found' in members["logs/elitea-mcp-tray.log"]
+
+
+@pytest.mark.parametrize("command, expected, secret", [
+    ("GITHUB_PERSONAL_ACCESS_TOKEN=Zq9xW2pLm7Vb npx -y @modelcontextprotocol/server-github",
+     "GITHUB_PERSONAL_ACCESS_TOKEN=**** npx -y @modelcontextprotocol/server-github", "Zq9xW2pLm7Vb"),
+    ('env API_KEY="a b/c==" npx -y @scope/srv', "env API_KEY=**** npx -y @scope/srv", "a b/c=="),
+    ("API_KEY=s3cr3t+Zm9v/YmFy== C:\\tools\\server.exe", "API_KEY=**** C:\\tools\\server.exe", "s3cr3t+Zm9v/YmFy=="),
+    ("GITHUB_PERSONAL_ACCESS_TOKEN=ghp_Zm9vYmFyYmF6cXV4 /c/tools/github-mcp-server.exe",
+     "GITHUB_PERSONAL_ACCESS_TOKEN=**** /c/tools/github-mcp-server.exe", "ghp_Zm9vYmFyYmF6cXV4"),
+    ("env API_KEY=ab/cd+ef==gh C:\\tools\\server.exe", "env API_KEY=**** C:\\tools\\server.exe", "ab/cd+ef==gh"),
+])
+def test_an_env_prefix_pasted_into_command_keeps_the_launcher_and_masks_the_value(folders, command, expected, secret):
+    log_dir, config_file = folders
+    config_file.write_text(json.dumps({"servers": {"w": {"command": command}}}), encoding="utf-8")
+    (log_dir / "elitea-mcp-tray.log").write_text(f'command "{command}" not found\n')
+
+    def doctor(context, on_results=None):
+        support_bundle.read_config(context)
+        return [fail('Local server "w" (stdio)', f'command "{command}" not found')]
+    with patch.object(support_bundle, "run_checks", side_effect=doctor):
+        members = read_members(export(config_file, log_dir))
+
+    assert json.loads(members["config.masked.json"])["servers"]["w"]["command"] == expected
+    for name in ("doctor.txt", "logs/elitea-mcp-tray.log", "config.masked.json"):
+        assert secret.encode() not in members[name], name
+
+
+@pytest.mark.parametrize("command", ['"C:\\Program Files\\nodejs\\npx.cmd" -y @modelcontextprotocol/server-github',
+                                     "'/opt/my tools/server' --stdio", "npx  -y   pkg", 'npx -y "@scope/srv"'])
+def test_a_command_with_nothing_to_mask_is_shown_exactly_as_written(command):
+    hidden = []
+
+    servers = support_bundle.project_config({"servers": {"w": {"command": command}}}, hidden)["servers"]
+
+    assert servers["w"]["command"] == command and hidden == []
+
+
+@pytest.mark.parametrize("command", ["npx -y @modelcontextprotocol/server-filesystem", "uv run"])
+def test_a_pasted_command_line_with_nothing_to_mask_stays_readable(folders, command):
+    log_dir, config_file = folders
+    config_file.write_text(json.dumps({"servers": {"w": {"command": command}}}), encoding="utf-8")
+    (log_dir / "elitea-mcp-tray.log").write_text(f'command "{command}" not found\n')
+
+    def doctor(context, on_results=None):
+        support_bundle.read_config(context)
+        return [fail('Local server "w" (stdio)', f'command "{command}" not found')]
+    with patch.object(support_bundle, "run_checks", side_effect=doctor):
+        members = read_members(export(config_file, log_dir))
+
+    assert json.loads(members["config.masked.json"])["servers"]["w"]["command"] == command
+    for name in ("doctor.txt", "logs/elitea-mcp-tray.log"):
+        assert f'command "{command}" not found'.encode() in members[name], name
+
+
+def test_a_mapping_or_an_existing_path_is_not_remembered_bare_but_a_base64_value_is(tmp_path):
+    hidden = []
+
+    mask_args(["run", "-v", "mcpdata:/workspace/data", "img"], "docker", None, hidden)
+    mask_args(["s.js", f"ROOT_DIR={tmp_path}", "K=/9j/4AAQSkZJRgABAQ"], "node", None, hidden)
+
+    assert "/workspace/data" not in hidden and str(tmp_path) not in hidden
+    assert "/9j/4AAQSkZJRgABAQ" in hidden
+
+
 def test_wrong_shapes_are_masked_whole(folders, leaky_doctor):
     log_dir, config_file = folders
     write_canary_setup(log_dir, config_file)
@@ -305,7 +564,7 @@ def test_a_broken_config_still_masks_its_secrets_in_the_logs(folders, leaky_doct
     members = read_members(export(config_file, log_dir))
 
     assert "config.masked.json" not in members
-    assert b"Trailing comma" in members["config.error.txt"]
+    assert b"trailing comma" in members["config.error.txt"].lower()
     assert {(name, core) for name, core in find_canary_cores(members) if name != "doctor.txt"} == set()
 
 
@@ -635,6 +894,19 @@ def test_export_from_the_tray_saves_the_bundle_and_opens_its_folder(app, folders
     assert leaky_doctor.call_args.args[0].list_local_session == app.list_local_session
     assert find_canary_cores(read_members(bundles[0])) == set()
     app.show_error.assert_not_called()
+
+
+def test_the_tray_exports_with_an_arg_that_looks_like_another_users_home(app, folders, leaky_doctor):
+    log_dir, config_file = folders
+    config_file.write_text(json.dumps({"servers": {"fs": {"command": "npx", "args": ["-y", "pkg", "--exclude", "~$*.docx"]}}}),
+                           encoding="utf-8")
+    finished = wait_for_idle(app)
+
+    app.export_support_bundle()
+    assert finished.wait(10)
+
+    app.show_error.assert_not_called()
+    assert len(list(log_dir.glob("elitea-mcp-support-*.zip"))) == 1
 
 
 def test_one_help_action_at_a_time(app, folders):

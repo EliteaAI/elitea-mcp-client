@@ -36,7 +36,8 @@ STDERR_TAIL_BYTES = 64 * 1024
 MASK = "****"
 MIN_SECRET_LENGTH = 4
 PLAIN_SETTING_PATTERN = re.compile(r"\d{1,5}|true|false", re.IGNORECASE)
-CREDENTIAL_NAME_PARTS = ("PASS", "SECRET", "TOKEN", "KEY", "PIN", "AUTH")
+CREDENTIAL_NAME_PARTS = ("PASS", "SECRET", "TOKEN", "KEY", "PIN", "AUTH", "CRED", "BEARER")
+SERVER_BLOCKS = ("servers", "mcpServers")
 URL_PATTERN = re.compile(r"https?://\S+")
 URL_WITH_HOST_PATTERN = re.compile(r"https?://[^\s/?#]\S*")
 URL_HOST_PATTERN = re.compile(r"(https?://)(?:[^\s/@?#]*@)?([^\s/?#]+)")
@@ -331,16 +332,38 @@ def collect_secret_values(config, server_conf):
     return sorted((secret for secret in secrets if len(secret) >= MIN_SECRET_LENGTH), key=len, reverse=True)
 
 
+def collect_config_secrets(config):
+    """Every value a whole config could leak: the token and the env and headers of each server in both server blocks, of any shape."""
+    secrets = set(collect_secret_values(config, {}))
+    for block in SERVER_BLOCKS:
+        servers = config.get(block)
+        for server_conf in servers.values() if isinstance(servers, dict) else ():
+            if isinstance(server_conf, dict):
+                secrets.update(collect_secret_values(config, keep_object_settings(server_conf)))
+    return secrets
+
+
+def keep_object_settings(server_conf):
+    """The env and headers of a server only when they are objects: the config check skips a server whose are not, so it never runs."""
+    return {key: server_conf[key] for key in ("env", "headers") if isinstance(server_conf.get(key), dict)}
+
+
+def is_credential_name(name):
+    return any(part in str(name).upper() for part in CREDENTIAL_NAME_PARTS)
+
+
 def is_plain_setting(name, value):
     """A port, a count or a flag under a name that does not suggest a credential, which masking would garble in every number it appears in."""
     return (isinstance(value, str) and PLAIN_SETTING_PATTERN.fullmatch(value.strip()) is not None
-            and not any(part in str(name).upper() for part in CREDENTIAL_NAME_PARTS))
+            and not is_credential_name(name))
 
 
 def list_secret_forms(value):
-    """A value as written, escaped in JSON or a repr, URL-encoded, line by line, and as URL masking leaves a value that is itself a URL."""
-    return {value, value.strip(), json.dumps(value)[1:-1], repr(value)[1:-1], urllib.parse.quote(value, safe=""),
-            urllib.parse.quote_plus(value), mask_url_secrets(value), *(line.strip() for line in value.splitlines())}
+    """A value as written, escaped in JSON (also unescaped Unicode, and JSON inside JSON) or a repr of text or bytes, URL-encoded with or without its slashes, line by line, and as URL masking leaves a value that is itself a URL."""
+    return {value, value.strip(), json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1],
+            json.dumps(json.dumps(value))[3:-3], repr(value)[1:-1], repr(value.encode("utf-8", "replace"))[2:-1],
+            urllib.parse.quote(value, safe=""), urllib.parse.quote(value), urllib.parse.quote_plus(value),
+            mask_url_secrets(value), *(line.strip() for line in value.splitlines())}
 
 
 def mask_secrets(lines, secrets):

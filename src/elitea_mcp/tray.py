@@ -40,12 +40,13 @@ from .utils.single_instance import AlreadyRunningError, hold_instance, run_as_ex
 from .utils.server_controller import get_server_controller
 from .utils.diagnostics import REPORT_FILE_NAME, TRAY_DIAGNOSTICS_HINT, DoctorContext, format_report, run_checks, summarize
 from .utils.server_loader import redact_urls
+from .utils.support_bundle import SAVED_MESSAGE, LogFiles, build_support_bundle
 from .utils.server_registry import DECLINED, FAILED, HEALTHY, REGISTERED
 from .tray_platforms import get_tray_platform
 from .main import main, find_default_log_file, get_default_paths, read_config_leniently
 from .settings_form import SettingsExit, describe_tk_install
-from .utils.logging_setup import (DAEMON, DEBUG, INFO, OWNER_ONLY_FILE_MODE, TRAY, apply_debug_logging, is_debug_logging,
-                                  register_log_secrets, restrict_to_owner, setup_logging)
+from .utils.logging_setup import (DAEMON, DEBUG, INFO, OWNER_ONLY_FILE_MODE, TRAY, apply_debug_logging, get_log_secrets,
+                                  is_debug_logging, register_log_secrets, restrict_to_owner, setup_logging)
 from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS, UpdateChecker, get_installed_version
 from .utils.self_update import consume_update_result, resolve_upgrade_plan, start_update_helper
 
@@ -60,6 +61,8 @@ STATUS_DOT_COLORS = {
     CONNECTED: (76, 175, 80, 255),
 }
 UPDATE_BADGE_COLOR = (255, 152, 0, 255)
+DIAGNOSTICS = "diagnostics"
+SUPPORT_BUNDLE = "support_bundle"
 KEEP_RUNNING = "The servers keep running the previous config."
 CONFIG_CHANGED = "config.json changed."
 
@@ -67,6 +70,14 @@ CONFIG_CHANGED = "config.json changed."
 def fit_notification_text(text):
     """Cut a notification to what Windows accepts, which refuses balloon text over 256 characters."""
     return text if len(text) <= NOTIFICATION_LIMIT else text[:NOTIFICATION_LIMIT - 3] + "..."
+
+
+def find_default_paths():
+    """The log and PID paths, or None when the log folder cannot be created, so a support bundle is still saved."""
+    try:
+        return get_default_paths()
+    except OSError:
+        return None
 
 
 def describe_problem_count(count):
@@ -118,7 +129,7 @@ class MCPTrayApp:
         self.config_error = None
         self.config_report = None
         self.settings = None
-        self.diagnostics_running = False
+        self.help_action = None
         self.settings_running = False
         self.has_duplicate_keys = False
         self._raw_config = None
@@ -356,7 +367,8 @@ class MCPTrayApp:
                     pystray.MenuItem(f"Update to {update_state.latest} and Restart", self.update_and_restart))
             menu_items.append(pystray.Menu.SEPARATOR)
         
-        diagnostics_label = "Running Diagnostics…" if self.diagnostics_running else "Run Diagnostics"
+        diagnostics_label = "Running Diagnostics…" if self.help_action == DIAGNOSTICS else "Run Diagnostics"
+        bundle_label = "Exporting Support Bundle…" if self.help_action == SUPPORT_BUNDLE else "Export Support Bundle"
         menu_items.extend([
             pystray.MenuItem("Logs", pystray.Menu(
                 pystray.MenuItem("Open Log File", self.open_log_file),
@@ -366,7 +378,8 @@ class MCPTrayApp:
                                  enabled=config is not None and not self.has_duplicate_keys),
             )),
             pystray.MenuItem("Help", pystray.Menu(
-                pystray.MenuItem(diagnostics_label, self.run_diagnostics, enabled=not self.diagnostics_running),
+                pystray.MenuItem(diagnostics_label, self.run_diagnostics, enabled=self.help_action is None),
+                pystray.MenuItem(bundle_label, self.export_support_bundle, enabled=self.help_action is None),
             )),
             pystray.MenuItem("About", self.show_about),
             pystray.MenuItem("Quit", self.quit_app),
@@ -415,9 +428,9 @@ class MCPTrayApp:
 
     def run_diagnostics(self, icon=None, item=None):
         """Run every check off the menu thread, which may take as long as the slowest server's start."""
-        if self.diagnostics_running:
+        if self.help_action is not None:
             return
-        self.diagnostics_running = True
+        self.help_action = DIAGNOSTICS
         self.update_menu()
         self.show_notification("Diagnostics", "Running diagnostics…")
         threading.Thread(target=self.write_diagnostics_report, name="diagnostics", daemon=True).start()
@@ -438,7 +451,33 @@ class MCPTrayApp:
             logger.exception("Diagnostics failed")
             self.show_error("Diagnostics", f"Could not run diagnostics: {error}")
         finally:
-            self.diagnostics_running = False
+            self.help_action = None
+            self.update_menu()
+
+    def export_support_bundle(self, icon=None, item=None):
+        """Build the bundle off the menu thread; it runs the doctor, which starts every server again, so it waits for no Diagnostics run and blocks one."""
+        if self.help_action is not None:
+            return
+        self.help_action = SUPPORT_BUNDLE
+        self.update_menu()
+        self.show_notification("Support Bundle", "Collecting the support bundle…")
+        threading.Thread(target=self.write_support_bundle, name="support-bundle", daemon=True).start()
+
+    def write_support_bundle(self):
+        """Save the bundle next to the logs, or in the home folder when there are none, and open the folder it is in."""
+        try:
+            paths = find_default_paths()
+            folder = paths["tray_log"].parent if paths else Path.home()
+            context = DoctorContext(get_config_file(), folder, self.list_local_session)
+            path = build_support_bundle(context, folder, LogFiles.from_default_paths(paths, self._log_file),
+                                        live_secrets=get_log_secrets())
+            self.platform.open_file(path.parent)
+            self.show_notification("Support Bundle", SAVED_MESSAGE.format(path.name))
+        except Exception as error:
+            logger.exception("Support bundle failed")
+            self.show_error("Support Bundle", f"Could not export the support bundle: {error}")
+        finally:
+            self.help_action = None
             self.update_menu()
 
     def list_local_session(self):

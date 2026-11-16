@@ -460,7 +460,7 @@ def test_the_switch_is_offered_only_when_a_rewrite_cannot_lose_anything(config_f
     help_items = next(item for item in menu if item.text == "Help").submenu.items
 
     assert [item.text for item in log_items] == ["Open Log File", "Open Logs Folder", "Enable Debug Logging"]
-    assert [item.text for item in help_items] == ["Run Diagnostics"]
+    assert [item.text for item in help_items] == ["Run Diagnostics", "Export Support Bundle"]
     assert not log_items[2].enabled
     assert tray_module.has_duplicate_keys(parse_config('{"a": {"b": 1, "b": 2}}', config_file))
 

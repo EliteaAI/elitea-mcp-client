@@ -13,6 +13,7 @@ from ..config import is_ssl_verification_enabled, load_config
 from ..config_errors import ConfigError
 from ..config_model import DEFAULT_STARTUP_TIMEOUT, DEFAULT_TIMEOUT, Severity, check_config
 from .package_updates import fetch_update_state, get_installed_version
+from .logging_setup import OWNER_ONLY_FILE_MODE, OWNER_ONLY_FOLDER_MODE, restrict_to_owner
 from .preflight import check_platform
 from .self_update import detect_install_method, resolve_upgrade_plan
 from .server_loader import collect_secret_values, load_servers, mask_secrets, redact_urls
@@ -198,8 +199,9 @@ def write_server_details(context, load):
     secrets = collect_secret_values(context.config, context.config["servers"].get(load.name) or {})
     path = context.error_dir / f"{load.name}-error.txt"
     try:
-        context.error_dir.mkdir(parents=True, exist_ok=True)
+        context.error_dir.mkdir(mode=OWNER_ONLY_FOLDER_MODE, parents=True, exist_ok=True)
         path.write_text(format_error_report(entry, mask_secrets(load.stderr_tail, secrets)), encoding="utf-8")
+        restrict_to_owner(path, OWNER_ONLY_FILE_MODE)
     except OSError as error:
         logger.debug(f"Could not write {path}: {error}")
         return ""

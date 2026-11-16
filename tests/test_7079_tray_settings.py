@@ -74,7 +74,7 @@ def build_tray(tmp_path, servers_running=False):
     app.show_notification = MagicMock()
     app.restart_server = MagicMock()
     app.update_checker = None
-    app.diagnostics_running = False
+    app.help_action = None
     app.has_duplicate_keys = False
     return app
 

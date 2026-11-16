@@ -25,7 +25,7 @@ def run_servers(log_mode=SERVE, log_file=None, pid_file=None, allow_multiple=Fal
         try:
             hold_instance(SERVE)
         except AlreadyRunningError as error:
-            print(error, file=sys.stderr)
+            show(str(error), logging.ERROR, file=sys.stderr)
             sys.exit(1)
     if pid_file:
         write_pid_file(pid_file)

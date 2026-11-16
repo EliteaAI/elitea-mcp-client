@@ -949,7 +949,7 @@ def run_tray(log_file=None, daemon=False, pid_file=None, allow_multiple=False):
 def show_already_running(error):
     """Say why this tray exits: in the log and on stderr, and in a box only when no terminal shows stderr, as the box waits for a click."""
     message = str(error)
-    logger.error(message)
+    logger.error(message, extra={"console": False})
     print(message, file=sys.stderr)
     if sys.stderr is not None and sys.stderr.isatty():
         return

@@ -727,3 +727,17 @@ def test_a_daemon_without_a_pid_file_still_runs_its_exit_cleanup_on_sigterm(tmp_
 
     wait_until(cleaned.exists)
     assert cleaned.read_text() == "cleaned"
+
+
+def test_a_refused_tray_in_a_terminal_prints_the_refusal_once_and_still_logs_it(tmp_path, monkeypatch, capsys):
+    from src.elitea_mcp.utils import logging_setup as src_logging_setup
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
+    log_file = tmp_path / "tray.log"
+    src_logging_setup.setup_logging(src_logging_setup.TRAY, {}, log_file)
+
+    tray_module.show_already_running(single_instance.AlreadyRunningError("ELITEA MCP Client is already running (PID 7, tray)."))
+
+    assert capsys.readouterr().err.count("already running (PID 7, tray)") == 1
+    for handler in src_logging_setup.logging.getLogger().handlers:
+        handler.flush()
+    assert "already running (PID 7, tray)" in log_file.read_text()

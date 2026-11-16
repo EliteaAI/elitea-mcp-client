@@ -18,6 +18,7 @@ def keep_client_id_out_of_the_real_config_dir(tmp_path, monkeypatch):
     """Every test that reaches the platform reads the client id, and every tray or `serve` takes its lock; keep both in a temporary folder and let go of the lock after the test."""
     for module in (client_identity, src_client_identity):
         monkeypatch.setattr(module, "get_config_dir", lambda: tmp_path)
+        monkeypatch.setattr(module, "_lock_skipped", False)
     yield
     for module in (single_instance, src_single_instance):
         module.release_instance()

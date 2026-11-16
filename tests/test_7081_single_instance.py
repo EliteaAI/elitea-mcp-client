@@ -19,6 +19,7 @@ import src.elitea_mcp.main as main_module
 import src.elitea_mcp.tray as tray_module
 from src.elitea_mcp.utils import client_identity, diagnostics, single_instance, update_helper
 from src.elitea_mcp.utils.logging_setup import SERVE, TRAY
+from elitea_mcp.utils import client_identity as elitea_client_identity
 from elitea_mcp.utils import single_instance as elitea_single_instance
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -518,3 +519,211 @@ def test_tests_never_reach_the_real_config_dir(tmp_path):
     assert single_instance.get_lock_path().parent == tmp_path
     assert elitea_single_instance.get_lock_path().parent == tmp_path
     assert real != tmp_path
+
+
+EXTRA_COPY = ("import sys\n"
+              "from pathlib import Path\n"
+              "from elitea_mcp.utils import client_identity, single_instance\n"
+              "client_identity.get_config_dir = lambda: Path(sys.argv[1])\n"
+              "single_instance.run_as_extra_copy()\n"
+              "print('ID', client_identity.load_client_id(), flush=True)\n"
+              "print('READY', flush=True)\n"
+              "sys.stdin.readline()\n")
+
+
+def start_extra_copy(config_dir):
+    process = subprocess.Popen([sys.executable, "-c", EXTRA_COPY, str(config_dir)], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, text=True, env=child_env())
+    client_id = process.stdout.readline().strip().removeprefix("ID ")
+    assert process.stdout.readline().strip() == "READY"
+    return process, client_id
+
+
+@posix_only
+def test_an_extra_copy_runs_beside_the_holder_with_a_temporary_id_and_leaves_its_owner_file(tmp_path, holders):
+    holder = holders(tmp_path, TRAY)
+    (tmp_path / client_identity.CLIENT_ID_FILE_NAME).write_text(f"{client_identity.read_machine_part()}-durable")
+    owner_before = (tmp_path / single_instance.OWNER_FILE_NAME).read_bytes()
+    extra, client_id = start_extra_copy(tmp_path)
+    try:
+        refused = try_second(tmp_path, SERVE)
+    finally:
+        extra.stdin.close()
+        extra.wait(timeout=10)
+
+    assert client_id.startswith(client_identity.read_machine_part()) and not client_id.endswith("-durable")
+    assert f"PID {holder.pid}, tray" in refused.stdout
+    assert (tmp_path / single_instance.OWNER_FILE_NAME).read_bytes() == owner_before
+
+
+@posix_only
+def test_an_extra_copy_alone_never_takes_the_lock_so_a_normal_copy_still_starts(tmp_path):
+    extra, _ = start_extra_copy(tmp_path)
+    try:
+        started = try_second(tmp_path, TRAY)
+    finally:
+        extra.stdin.close()
+        extra.wait(timeout=10)
+
+    assert started.returncode == 0
+    assert not (tmp_path / single_instance.OWNER_FILE_NAME).exists()
+
+
+@posix_only
+def test_serve_with_allow_multiple_runs_beside_the_holder_and_writes_no_owner_file(tmp_path, holders, monkeypatch):
+    holders(tmp_path, TRAY)
+    owner_before = (tmp_path / single_instance.OWNER_FILE_NAME).read_bytes()
+    monkeypatch.setattr(elitea_run_servers, "load_config", MagicMock(side_effect=RuntimeError("got past the guard")))
+
+    with pytest.raises(RuntimeError, match="got past the guard"):
+        elitea_run_servers.run_servers(allow_multiple=True)
+
+    assert (tmp_path / single_instance.OWNER_FILE_NAME).read_bytes() == owner_before
+    assert elitea_client_identity.is_lock_skipped()
+
+
+@posix_only
+def test_a_tray_with_allow_multiple_starts_beside_the_holder(tmp_path, holders, monkeypatch):
+    holders(tmp_path, SERVE)
+    tray_app = MagicMock()
+    monkeypatch.setattr(tray_module, "MCPTrayApp", tray_app)
+    monkeypatch.setattr(tray_module, "setup_logging", MagicMock())
+    monkeypatch.setattr(tray_module, "read_config_leniently", MagicMock(return_value={}))
+
+    tray_module.run_tray(allow_multiple=True)
+
+    tray_app.assert_called_once()
+    assert client_identity.is_lock_skipped()
+
+
+def cli_with(monkeypatch, *argv):
+    calls = {}
+    monkeypatch.setattr(main_module, "exit_if_already_running", MagicMock(side_effect=AssertionError("peeked")))
+    monkeypatch.setattr(main_module, "daemonize", lambda pid_file, log_file: calls.setdefault("daemonize", pid_file) or True)
+    monkeypatch.setattr(main_module, "run_servers", lambda *args, **kwargs: calls.setdefault("run_servers", (args, kwargs)))
+    monkeypatch.setattr(main_module, "macos_gui_daemonize", lambda *args: calls.setdefault("macos", args))
+    monkeypatch.setattr(sys, "argv", ["elitea-mcp", *argv])
+    main_module.run_cli()
+    return calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="daemon mode is POSIX only")
+def test_serve_daemon_with_allow_multiple_skips_the_peek_and_writes_no_pid_file_by_default(tmp_path, monkeypatch):
+    calls = cli_with(monkeypatch, "serve", "--daemon", "--allow-multiple", "--log-file", str(tmp_path / "d.log"))
+
+    assert calls["daemonize"] is None
+    args, kwargs = calls["run_servers"]
+    assert args[2] is None and args[3] is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="daemon mode is POSIX only")
+def test_serve_daemon_with_allow_multiple_writes_only_the_pid_file_it_was_given(tmp_path, monkeypatch):
+    calls = cli_with(monkeypatch, "serve", "--daemon", "--allow-multiple", "--pid-file", str(tmp_path / "extra.pid"),
+                     "--log-file", str(tmp_path / "d.log"))
+
+    assert calls["daemonize"] == str(tmp_path / "extra.pid")
+    assert calls["run_servers"][0][2] == str(tmp_path / "extra.pid")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="daemon mode is POSIX only")
+def test_allow_multiple_refuses_the_holders_default_pid_file(tmp_path, monkeypatch, capsys):
+    default = main_module.get_default_paths()["serve_pid"]
+
+    with pytest.raises(SystemExit) as exit_:
+        cli_with(monkeypatch, "serve", "--daemon", "--allow-multiple", "--pid-file", str(default))
+
+    assert exit_.value.code == 1
+    assert "PID file of the copy holding the lock" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="daemon mode is POSIX only")
+def test_a_daemon_without_allow_multiple_still_peeks_and_uses_the_default_pid_file(tmp_path, monkeypatch):
+    with pytest.raises(AssertionError, match="peeked"):
+        cli_with(monkeypatch, "serve", "--daemon")
+
+    monkeypatch.setattr(main_module, "exit_if_already_running", lambda: None)
+    calls = {}
+    monkeypatch.setattr(main_module, "daemonize", lambda pid_file, log_file: calls.setdefault("daemonize", pid_file) or True)
+    monkeypatch.setattr(main_module, "run_servers", lambda *args, **kwargs: calls.setdefault("run_servers", (args, kwargs)))
+    monkeypatch.setattr(sys, "argv", ["elitea-mcp", "serve", "--daemon"])
+    main_module.run_cli()
+    assert calls["daemonize"] == str(main_module.get_default_paths()["serve_pid"])
+    assert calls["run_servers"][0][3] is False
+
+
+def test_the_macos_launcher_forwards_allow_multiple_to_the_child(tmp_path, monkeypatch):
+    started = {}
+
+    def fake_popen(cmd, **kwargs):
+        started["cmd"] = cmd
+        return MagicMock(pid=4242)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/elitea-mcp")
+
+    with pytest.raises(SystemExit):
+        main_module.macos_gui_daemonize(None, None, True)
+
+    assert started["cmd"] == ["/usr/local/bin/elitea-mcp", "tray", "--allow-multiple"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="daemon mode is POSIX only")
+def test_tray_daemon_with_allow_multiple_hands_the_flag_to_the_macos_launcher(tmp_path, monkeypatch):
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    calls = cli_with(monkeypatch, "tray", "--daemon", "--allow-multiple", "--log-file", str(tmp_path / "t.log"))
+
+    assert calls["macos"][0] is None and calls["macos"][2] is True
+
+
+def test_an_updated_extra_tray_is_relaunched_as_an_extra_copy():
+    from src.elitea_mcp.utils import self_update
+
+    assert self_update.build_relaunch_command()[-1] == "tray"
+    client_identity.skip_lock()
+    assert self_update.build_relaunch_command()[-2:] == ["tray", "--allow-multiple"]
+
+
+def test_a_foreground_serve_hands_allow_multiple_to_run_servers(monkeypatch):
+    calls = cli_with(monkeypatch, "serve", "--allow-multiple")
+
+    assert calls["run_servers"][1]["allow_multiple"] is True
+
+
+def test_a_foreground_tray_hands_allow_multiple_to_run_tray(monkeypatch):
+    run_tray = MagicMock()
+    monkeypatch.setattr(tray_module, "run_tray", run_tray)
+    cli_with(monkeypatch, "tray", "--allow-multiple")
+
+    assert run_tray.call_args.kwargs["allow_multiple"] is True
+
+
+@pytest.mark.parametrize("command", ["serve", "tray"])
+def test_without_the_flag_a_foreground_copy_takes_the_lock(monkeypatch, command):
+    calls = {}
+    monkeypatch.setattr(main_module, "run_servers", lambda *args, **kwargs: calls.setdefault("run", kwargs))
+    monkeypatch.setattr(tray_module, "run_tray", lambda *args, **kwargs: calls.setdefault("run", kwargs))
+    monkeypatch.setattr(sys, "argv", ["elitea-mcp", command])
+    main_module.run_cli()
+
+    assert calls["run"]["allow_multiple"] is False
+
+
+DAEMON_WITHOUT_PID_FILE = ("import atexit, sys, time\n"
+                           "from pathlib import Path\n"
+                           "import elitea_mcp.main as m\n"
+                           "if m.daemonize(None, sys.argv[1]):\n"
+                           "    atexit.register(lambda: Path(sys.argv[2]).write_text('cleaned'))\n"
+                           "    Path(sys.argv[3]).write_text(str(__import__('os').getpid()))\n"
+                           "    time.sleep(60)\n")
+
+
+@posix_only
+def test_a_daemon_without_a_pid_file_still_runs_its_exit_cleanup_on_sigterm(tmp_path):
+    cleaned, pid_path = tmp_path / "cleaned", tmp_path / "daemon.pid"
+    subprocess.run([sys.executable, "-c", DAEMON_WITHOUT_PID_FILE, str(tmp_path / "d.log"), str(cleaned), str(pid_path)],
+                   env=child_env(), timeout=30)
+    wait_until(pid_path.exists)
+    os.kill(int(pid_path.read_text()), signal.SIGTERM)
+
+    wait_until(cleaned.exists)
+    assert cleaned.read_text() == "cleaned"

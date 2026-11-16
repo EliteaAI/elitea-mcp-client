@@ -36,7 +36,7 @@ from .config import get_bootstrap_config, get_config_file, has_duplicate_keys, l
 from .config_model import NOTIFICATION_LIMIT, check_config, needs_restart, write_config_schema
 from .utils.config_watcher import ConfigFileWatcher
 from .utils.pid_file import write_pid_file
-from .utils.single_instance import AlreadyRunningError, hold_instance
+from .utils.single_instance import AlreadyRunningError, hold_instance, run_as_extra_copy
 from .utils.server_controller import get_server_controller
 from .utils.diagnostics import REPORT_FILE_NAME, TRAY_DIAGNOSTICS_HINT, DoctorContext, format_report, run_checks, summarize
 from .utils.server_loader import redact_urls
@@ -922,7 +922,7 @@ class MCPTrayApp:
         self.icon.run(setup=self._on_tray_ready)
 
 
-def run_tray(log_file=None, daemon=False, pid_file=None):
+def run_tray(log_file=None, daemon=False, pid_file=None, allow_multiple=False):
     """Entry point for the tray application."""
     # Set fork safety for macOS BEFORE any other imports or operations
     if platform.system() == "Darwin":
@@ -932,11 +932,14 @@ def run_tray(log_file=None, daemon=False, pid_file=None):
     setup_logging(DAEMON if daemon else TRAY, read_config_leniently(), log_file)
     if log_file:
         logger.info(f"Logging to file: {log_file}")
-    try:
-        hold_instance(TRAY)
-    except AlreadyRunningError as error:
-        show_already_running(error)
-        sys.exit(1)
+    if allow_multiple:
+        run_as_extra_copy()
+    else:
+        try:
+            hold_instance(TRAY)
+        except AlreadyRunningError as error:
+            show_already_running(error)
+            sys.exit(1)
     if pid_file:
         write_pid_file(pid_file)
     app = MCPTrayApp(log_file)

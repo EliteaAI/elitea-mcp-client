@@ -99,6 +99,13 @@ def hold_instance(command):
     write_owner(command)
 
 
+def run_as_extra_copy():
+    """Skip the single-instance lock for --allow-multiple; the platform still declines servers whose names another copy registered."""
+    client_identity.skip_lock()
+    logger.warning("Running as an extra copy (--allow-multiple): servers with the same names as in another running copy "
+                   "are declined by the platform.")
+
+
 def warn_undetectable(error):
     logger.warning(f"{error}. Another running copy of the client cannot be detected.")
 

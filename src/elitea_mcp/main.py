@@ -138,7 +138,7 @@ def parse_config_port(value):
         return None
     return port
 
-def macos_gui_daemonize(pid_file=None, log_file=None):
+def macos_gui_daemonize(pid_file=None, log_file=None, allow_multiple=False):
     """
     macOS-compatible daemonization for GUI applications.
     Uses subprocess with exec to avoid fork safety issues with Cocoa frameworks.
@@ -167,6 +167,8 @@ def macos_gui_daemonize(pid_file=None, log_file=None):
             cmd += ['--log-file', str(log_file)]
         if pid_file:
             cmd += ['--pid-file', str(pid_file)]
+        if allow_multiple:
+            cmd += ['--allow-multiple']
         
         # Set up environment for the subprocess
         env = os.environ.copy()
@@ -264,11 +266,10 @@ def daemonize(pid_file=None, log_file=None):
         with open('/dev/null', 'a+') as se:
             os.dup2(se.fileno(), sys.stderr.fileno())
     
-    if pid_file:
-        def signal_handler(signum, frame):
-            sys.exit(0)
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
+    def signal_handler(signum, frame):
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
     
     return True
 
@@ -374,6 +375,17 @@ def doctor(config_file=None):
     sys.exit(exit_code(results))
 
 
+def choose_daemon_pid_file(args, default):
+    """The default PID file belongs to the copy holding the lock; an extra copy writes only one it was given, never that one."""
+    if not args.allow_multiple:
+        return args.pid_file or default
+    if args.pid_file and Path(args.pid_file).resolve() == Path(default).resolve():
+        print(f"--allow-multiple cannot use {default}, the PID file of the copy holding the lock; pass another --pid-file.",
+              file=sys.stderr)
+        sys.exit(1)
+    return args.pid_file
+
+
 def exit_if_already_running():
     """Refuse in the launching terminal, before a fork or a spawn would hide the refusal in the daemon's output."""
     holder = find_holder()
@@ -421,11 +433,15 @@ def run_cli():
     serve_parser.add_argument('--daemon', action='store_true', help='Run in daemon mode (background)')
     serve_parser.add_argument('--pid-file', type=str, help='PID file location for daemon mode')
     serve_parser.add_argument('--log-file', type=str, help='Log file location for daemon mode')
+    serve_parser.add_argument('--allow-multiple', action='store_true',
+                              help='Run even when another tray or serve runs; servers with the same names are declined by the platform')
     
     tray_parser = subparsers.add_parser("tray", help="Start the system tray application for easy access to MCP client features")
     tray_parser.add_argument('--daemon', action='store_true', help='Run in daemon mode (background)')
     tray_parser.add_argument('--pid-file', type=str, help='PID file location for daemon mode')
     tray_parser.add_argument('--log-file', type=str, help='Log file location for daemon mode')
+    tray_parser.add_argument('--allow-multiple', action='store_true',
+                             help='Run even when another tray or serve runs; servers with the same names are declined by the platform')
 
     validate_parser = subparsers.add_parser("validate", help="Check the config file and list every problem; exits non-zero when any is an error")
     validate_parser.add_argument('--config', type=str, help='Config file to check (defaults to the client config file)')
@@ -456,19 +472,20 @@ def run_cli():
     elif args.command == "serve":
         # Handle daemon mode for serve command
         if hasattr(args, 'daemon') and args.daemon:
-            exit_if_already_running()
+            if not args.allow_multiple:
+                exit_if_already_running()
             default_paths = get_default_paths()
-            pid_file = args.pid_file if hasattr(args, 'pid_file') and args.pid_file else default_paths['serve_pid']
+            pid_file = choose_daemon_pid_file(args, default_paths['serve_pid'])
             log_file = args.log_file if hasattr(args, 'log_file') and args.log_file else default_paths['serve_log']
             
             logger.info(f"Starting elitea-mcp serve in daemon mode...")
             logger.info(f"PID file: {pid_file}")
             logger.info(f"Log file: {log_file}")
             
-            if daemonize(str(pid_file), str(log_file)):
-                run_servers(DAEMON, str(log_file), str(pid_file))
+            if daemonize(pid_file and str(pid_file), str(log_file)):
+                run_servers(DAEMON, str(log_file), pid_file and str(pid_file), args.allow_multiple)
         else:
-            run_servers(SERVE, args.log_file or find_default_log_file('serve_log'))
+            run_servers(SERVE, args.log_file or find_default_log_file('serve_log'), allow_multiple=args.allow_multiple)
             
     elif args.command == "tray":
         # Fix for macOS fork safety with GUI applications
@@ -487,7 +504,7 @@ def run_cli():
         
         # Check if this is a daemon subprocess (even without --daemon flag)
         is_daemon_subprocess = os.environ.get('ELITEA_MCP_DAEMON_MODE') == 'true'
-        if (hasattr(args, 'daemon') and args.daemon) and not is_daemon_subprocess:
+        if (hasattr(args, 'daemon') and args.daemon) and not is_daemon_subprocess and not args.allow_multiple:
             exit_if_already_running()
 
         from .tray import run_tray
@@ -495,7 +512,7 @@ def run_cli():
         # Handle daemon mode for tray command
         if (hasattr(args, 'daemon') and args.daemon) and not is_daemon_subprocess:
             default_paths = get_default_paths()
-            pid_file = args.pid_file if hasattr(args, 'pid_file') and args.pid_file else default_paths['tray_pid']
+            pid_file = choose_daemon_pid_file(args, default_paths['tray_pid'])
             log_file = args.log_file if hasattr(args, 'log_file') and args.log_file else default_paths['tray_log']
             
             logger.info(f"Starting elitea-mcp tray in daemon mode...")
@@ -506,18 +523,19 @@ def run_cli():
             # Use alternative approach for macOS
             if platform.system() == "Darwin":
                 logger.info("Using macOS-compatible daemon mode for GUI applications...")
-                macos_gui_daemonize(str(pid_file), str(log_file))
+                macos_gui_daemonize(pid_file and str(pid_file), str(log_file), args.allow_multiple)
                 # This will exit, so the code below won't run
             else:
                 # Traditional Unix daemonization for non-macOS systems
-                if daemonize(str(pid_file), str(log_file)):
-                    run_tray(log_file=str(log_file), daemon=True, pid_file=str(pid_file))
+                if daemonize(pid_file and str(pid_file), str(log_file)):
+                    run_tray(log_file=str(log_file), daemon=True, pid_file=pid_file and str(pid_file),
+                             allow_multiple=args.allow_multiple)
         else:
             # Normal mode or daemon subprocess
             if is_daemon_subprocess:
                 logger.info("Running in macOS daemon subprocess...")
             run_tray(log_file=args.log_file, daemon=is_daemon_subprocess,
-                     pid_file=args.pid_file if is_daemon_subprocess else None)
+                     pid_file=args.pid_file if is_daemon_subprocess else None, allow_multiple=args.allow_multiple)
     elif args.command == "run" or args.command is None:
         main(
             project_id=args.project_id if hasattr(args, 'project_id') else None,

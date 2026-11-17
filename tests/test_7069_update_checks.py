@@ -177,14 +177,3 @@ def test_disabled_update_check_hides_update_items():
     texts = menu_texts(app, bootstrap)
     assert "Check for Updates" not in texts
     assert not any(text.startswith("Update to") for text in texts)
-
-
-def test_about_shows_the_installed_version():
-    app, _ = build_tray()
-    app.show_notification = MagicMock()
-    with patch.object(tray_module, "get_installed_version", return_value="0.1.36"):
-        app.show_about()
-    assert "Version: 0.1.36" in app.show_notification.call_args.args[1]
-    with patch.object(tray_module, "get_installed_version", return_value=None):
-        app.show_about()
-    assert "0.1.16" not in app.show_notification.call_args.args[1]

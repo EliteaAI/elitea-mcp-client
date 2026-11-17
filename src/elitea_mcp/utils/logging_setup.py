@@ -7,7 +7,7 @@ import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from .server_loader import collect_config_secrets, mask_secrets
+from .secret_masking import collect_config_secrets, mask_secrets
 from .server_output import SERVER_OUTPUT_LOGGER_NAME
 
 CLI = "cli"
@@ -42,7 +42,8 @@ _secrets = ()
 def register_log_secrets(config):
     """Mask every value a config could leak, keeping earlier ones because records about them may still be written."""
     global _secrets
-    _secrets = tuple(sorted(set(_secrets) | collect_config_secrets(config), key=len, reverse=True))
+    known = set(_secrets) | collect_config_secrets(config)
+    _secrets = tuple(sorted(known, key=len, reverse=True))
 
 
 def get_log_secrets():

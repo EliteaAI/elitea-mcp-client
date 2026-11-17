@@ -28,7 +28,7 @@ from .utils.logging_setup import (CLI, DAEMON, OWNER_ONLY_FILE_MODE, OWNER_ONLY_
                                   build_daemon_output_path, install_crash_hooks, register_log_secrets,
                                   report_unwritable_log, restrict_to_owner, setup_logging)
 from .utils.preflight import PreflightError, validate_platform_config
-from .utils.server_loader import redact_urls
+from .utils.secret_masking import redact_urls
 from .utils.single_instance import Holder, describe_holder, find_holder
 from .utils.support_bundle import SAVED_MESSAGE, LogFiles, build_support_bundle
 

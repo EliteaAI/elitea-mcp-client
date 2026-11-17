@@ -39,7 +39,7 @@ from .utils.pid_file import write_pid_file
 from .utils.single_instance import AlreadyRunningError, hold_instance, run_as_extra_copy
 from .utils.server_controller import get_server_controller
 from .utils.diagnostics import REPORT_FILE_NAME, TRAY_DIAGNOSTICS_HINT, DoctorContext, format_report, run_checks, summarize
-from .utils.server_loader import redact_urls
+from .utils.secret_masking import redact_urls
 from .utils.support_bundle import SAVED_MESSAGE, LogFiles, build_support_bundle
 from .utils.server_registry import DECLINED, FAILED, HEALTHY, REGISTERED
 from .tray_platforms import get_tray_platform

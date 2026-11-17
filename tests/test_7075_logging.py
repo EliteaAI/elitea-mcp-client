@@ -25,8 +25,8 @@ from elitea_mcp.utils.diagnostics import DoctorContext, check_environment
 from elitea_mcp.utils.logging_setup import (CLI, DAEMON, RUN_STDIO, SERVE, TRAY, UNMASKABLE_RECORD, SecretMaskingFilter,
                                             build_server_output_log_path, is_debug_logging, register_log_secrets,
                                             setup_logging)
-from elitea_mcp.utils.server_loader import (MASK, ServerFailure, ServerLoad, ServerStartError, collect_secret_values,
-                                            mask_secrets, mask_url_secrets, redact_urls)
+from elitea_mcp.utils.secret_masking import MASK, collect_secret_values, mask_secrets, mask_url_secrets, redact_urls
+from elitea_mcp.utils.server_loader import ServerFailure, ServerLoad, ServerStartError
 from elitea_mcp.utils.preflight import PreflightError
 from elitea_mcp.utils.server_output import ServerOutputPipe, flush_server_output
 from elitea_mcp.utils.server_registry import ServerRegistry

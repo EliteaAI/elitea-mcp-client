@@ -24,7 +24,7 @@ from src.elitea_mcp.config_errors import list_hidden_values, redact_values
 from src.elitea_mcp.config_model import ClientConfig, RemoteServer, StdioServer
 from src.elitea_mcp.utils import logging_setup, support_bundle
 from src.elitea_mcp.utils.diagnostics import REPORT_FILE_NAME, DoctorContext, fail, ok
-from src.elitea_mcp.utils.server_loader import list_secret_forms
+from src.elitea_mcp.utils.secret_masking import list_secret_forms
 from src.elitea_mcp.utils.support_bundle import (CONFIG_RULES, CREDENTIAL_PATTERNS, DAEMON_OUTPUT_BUDGET, MAIN_LOG_BUDGET,
                                                  REPORTS_BUDGET, SERVER_LOG_BUDGET, SERVER_RULES, UPDATE_LOG_BUDGET,
                                                  LogFiles, build_support_bundle, mask_args, resolve_output)

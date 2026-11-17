@@ -11,8 +11,9 @@ import socketio
 from ..config import is_ssl_verification_enabled
 from ..config_model import DEFAULT_STARTUP_TIMEOUT
 from .client_identity import EPOCH, load_client_id, take_next_generation
+from .secret_masking import mask_url_secrets, redact_urls
 from .server_loader import (ServerStartError, find_leaf_exception, load_servers, open_session, read_startup_timeout,
-                            mask_url_secrets, read_transport, redact_urls, replay_stderr)
+                            read_transport, replay_stderr)
 from .server_registry import FAILED, HEALTHY
 from .session_manager import get_session_manager
 from .tool_result import build_error_result, render_tool_result

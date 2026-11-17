@@ -12,11 +12,12 @@ from typing import Callable, Optional
 from ..config import is_ssl_verification_enabled, load_config
 from ..config_errors import ConfigError
 from ..config_model import DEFAULT_STARTUP_TIMEOUT, DEFAULT_TIMEOUT, Severity, check_config
-from .package_updates import fetch_update_state, get_installed_version
 from .logging_setup import OWNER_ONLY_FILE_MODE, OWNER_ONLY_FOLDER_MODE, restrict_to_owner
+from .package_updates import fetch_update_state, get_installed_version
 from .preflight import check_platform
+from .secret_masking import collect_secret_values, mask_secrets, redact_urls
 from .self_update import detect_install_method, resolve_upgrade_plan
-from .server_loader import collect_secret_values, load_servers, mask_secrets, redact_urls
+from .server_loader import load_servers
 from .server_registry import DECLINED, FAILED, HEALTHY, ServerEntry
 from .server_supervisor import collect_skipped_servers, format_error_report
 from .session_status import read_running_session

@@ -20,9 +20,9 @@ from ..config_errors import backup_file_for, list_hidden_values, parse_config
 from .diagnostics import REPORT_FILE_NAME, describe_os, format_report, read_config, run_checks
 from .logging_setup import build_daemon_output_path, build_server_output_log_path
 from .package_updates import get_installed_version
+from .secret_masking import (MASK, MIN_SECRET_LENGTH, collect_config_secrets, is_credential_name, is_plain_setting,
+                             list_secret_forms, mask_secrets, mask_url_secrets, redact_urls)
 from .self_update import detect_install_method
-from .server_loader import (MASK, MIN_SECRET_LENGTH, collect_config_secrets, is_credential_name, is_plain_setting,
-                            list_secret_forms, mask_secrets, mask_url_secrets, redact_urls)
 
 SAVED_MESSAGE = "Support bundle saved: {}. Review it, then attach it to your bug report."
 BUNDLE_NAME_FORMAT = "elitea-mcp-support-%Y%m%d-%H%M%S.zip"

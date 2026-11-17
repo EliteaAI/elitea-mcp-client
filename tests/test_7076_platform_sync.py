@@ -11,8 +11,9 @@ import socketio
 from src.elitea_mcp.utils import sio as sio_module
 from src.elitea_mcp.utils.client_identity import read_machine_part
 from src.elitea_mcp.utils.logging_setup import SERVE, setup_logging
+from src.elitea_mcp.utils.secret_masking import redact_urls
 from src.elitea_mcp.utils.server_loader import (EXITED, INVALID_CONFIG, TIMEOUT, UNREACHABLE, ServerFailure, ServerLoad,
-                                                load_servers, read_startup_timeout, redact_urls)
+                                                load_servers, read_startup_timeout)
 from src.elitea_mcp.utils.server_output import flush_server_output
 from src.elitea_mcp.utils.server_registry import DECLINED, FAILED, HEALTHY, REGISTERED, ServerRegistry
 from src.elitea_mcp.utils.sio import start_socket_connection

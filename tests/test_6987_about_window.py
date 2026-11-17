@@ -23,7 +23,6 @@ def build_tray():
     app = tray_module.MCPTrayApp.__new__(tray_module.MCPTrayApp)
     app.icon = None
     app.platform = TrayPlatform()
-    app.about_running = False
     app.show_notification = MagicMock()
     return app
 
@@ -33,11 +32,11 @@ def fake_window(exit_code, seconds=0.0):
     return lambda: [sys.executable, "-c", f"import sys, time; time.sleep({seconds}); sys.exit({exit_code})"]
 
 
-def wait_for_about(app):
-    waiter = next((thread for thread in threading.enumerate() if thread.name == "about"), None)
-    if waiter:
+def wait_for_about():
+    waiters = [thread for thread in threading.enumerate() if thread.name == "about"]
+    for waiter in waiters:
         waiter.join(10)
-    return waiter
+    return waiters
 
 
 def test_about_opens_a_window_process_and_returns_at_once(monkeypatch):
@@ -48,10 +47,9 @@ def test_about_opens_a_window_process_and_returns_at_once(monkeypatch):
     app.show_about()
 
     assert time.monotonic() - started < 0.5
-    assert app.about_running
-    waiter = wait_for_about(app)
-    assert waiter.daemon
-    assert not app.about_running
+    waiters = wait_for_about()
+    assert [waiter.daemon for waiter in waiters] == [True]
+    assert not any(waiter.is_alive() for waiter in waiters)
     app.show_notification.assert_not_called()
 
 
@@ -68,17 +66,16 @@ def test_the_window_process_gets_the_platform_launch_options(monkeypatch):
     assert run.call_args.kwargs["stdin"] == subprocess.DEVNULL
 
 
-def test_a_second_click_while_the_window_is_open_says_where_it_is(monkeypatch):
+def test_a_click_while_a_window_is_open_opens_another_without_a_notification(monkeypatch):
     app = build_tray()
     monkeypatch.setattr(tray_module, "build_about_command", fake_window(SettingsExit.CANCELLED, seconds=1.0))
 
     app.show_about()
     app.show_about()
 
-    assert [thread.name for thread in threading.enumerate()].count("about") == 1
-    assert [call.args for call in app.show_notification.call_args_list] == [
-        ("About", "About is already open; find it in the taskbar.")]
-    wait_for_about(app)
+    assert [thread.name for thread in threading.enumerate()].count("about") == 2
+    wait_for_about()
+    app.show_notification.assert_not_called()
 
 
 @pytest.mark.parametrize("exit_code", [SettingsExit.TK_MISSING, SettingsExit.NO_DISPLAY, 1])
@@ -92,7 +89,6 @@ def test_without_a_window_about_falls_back_to_a_notification_with_the_version(mo
     title, message = app.show_notification.call_args.args
     assert title == "ELITEA MCP Client"
     assert "Version: 0.1.36" in message
-    assert not app.about_running
 
 
 def test_a_window_process_that_cannot_start_falls_back_to_a_notification(monkeypatch):
@@ -102,7 +98,6 @@ def test_a_window_process_that_cannot_start_falls_back_to_a_notification(monkeyp
     app.run_about_window()
 
     assert "Version:" in app.show_notification.call_args.args[1]
-    assert not app.about_running
 
 
 def test_about_names_the_version_or_a_development_checkout(monkeypatch):

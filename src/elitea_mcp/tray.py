@@ -132,7 +132,6 @@ class MCPTrayApp:
         self.settings = None
         self.help_action = None
         self.settings_running = False
-        self.about_running = False
         self.has_duplicate_keys = False
         self._raw_config = None
         self._restart_announced = False
@@ -872,11 +871,7 @@ class MCPTrayApp:
             self.show_error("Configuration Error", f"Failed to load configuration: {str(e)}")
 
     def show_about(self, icon=None, item=None):
-        """Open the About window in its own process and return at once, since a notification can be hidden by the system's notification settings."""
-        if self.about_running:
-            self.show_notification("About", f"About is already open; find it {self.platform.open_window_hint}.")
-            return
-        self.about_running = True
+        """Open an About window in its own process on every click and return at once; a notification saying one is already open could be hidden by the system's notification settings, and a window edits nothing."""
         threading.Thread(target=self.run_about_window, name="about", daemon=True).start()
 
     def run_about_window(self):
@@ -888,8 +883,6 @@ class MCPTrayApp:
             exit_code = process.returncode
         except OSError as error:
             output, exit_code = str(error), None
-        finally:
-            self.about_running = False
         if exit_code != SettingsExit.CANCELLED:
             logger.warning(f"The About window did not open (exit code {exit_code}): {output.strip()}")
             self.show_notification("ELITEA MCP Client", "\n".join(describe_about()))

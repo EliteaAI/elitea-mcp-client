@@ -284,6 +284,7 @@ elitea-mcp tray                      # Launch system tray application
 elitea-mcp validate                  # List every problem in the config file; exit 1 when any is an error, 0 otherwise; --config <path> checks another file
 elitea-mcp doctor                    # Check the whole local setup, one line per check; exit 1 when any check fails; --config <path> checks another file
 elitea-mcp support-bundle            # Save a zip for a bug report in the current folder; --output <folder or .zip>, --config <path>
+elitea-mcp about                     # Show the version and licence in a window; prints them when no window can open
 elitea-mcp --version                 # Print the installed version
 ```
 

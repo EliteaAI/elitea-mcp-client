@@ -24,6 +24,7 @@ from .utils.diagnostics import DOCTOR_HINT, REPORT_TITLE, DoctorContext, exit_co
 from .utils.package_updates import get_installed_version
 from .settings_form import exit_code_for_cli
 from .settings_window import run_settings_window
+from .about_window import run_about_window
 from .utils.logging_setup import (CLI, DAEMON, OWNER_ONLY_FILE_MODE, OWNER_ONLY_FOLDER_MODE, RUN_SSE, RUN_STDIO, SERVE,
                                   build_daemon_output_path, install_crash_hooks, register_log_secrets,
                                   report_unwritable_log, restrict_to_owner, setup_logging)
@@ -477,6 +478,9 @@ def run_cli():
     settings_parser = subparsers.add_parser("settings", help="Open the Settings window to set the deployment URL, token and project ID")
     settings_parser.add_argument('--from-tray', action='store_true', help=argparse.SUPPRESS)
 
+    about_parser = subparsers.add_parser("about", help="Show the version of this client in a window, or print it when no window can open")
+    about_parser.add_argument('--from-tray', action='store_true', help=argparse.SUPPRESS)
+
     doctor_parser = subparsers.add_parser("doctor", help="Check the whole local setup (client, config, platform, local servers) and print one line per check; exits non-zero when any check fails")
     doctor_parser.add_argument('--config', type=str, help='Config file to check (defaults to the client config file)')
 
@@ -496,6 +500,10 @@ def run_cli():
         install_crash_hooks()
         exit_code = run_settings_window()
         sys.exit(exit_code if args.from_tray else exit_code_for_cli(exit_code))
+    elif args.command == "about":
+        install_crash_hooks()
+        exit_code = run_about_window()
+        sys.exit(exit_code if args.from_tray else 0)
     elif args.command == "bootstrap":
         bootstrap(
             deployment_url=args.deployment_url if hasattr(args, 'deployment_url') else None,

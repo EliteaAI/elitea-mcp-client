@@ -38,6 +38,16 @@ def show_in_dock_as_elitea():
     application.activateIgnoringOtherApps_(True)
 
 
+def bring_to_front(root):
+    """Raise a window opened from the tray above the app the user was in, since the tray process never owns the foreground."""
+    if sys.platform == "darwin":
+        show_in_dock_as_elitea()
+    root.lift()
+    root.attributes("-topmost", True)
+    root.after(300, lambda: root.attributes("-topmost", False))
+    root.focus_force()
+
+
 class SettingsWindow:
     def __init__(self, tkinter, ttk, root, form):
         self.tkinter, self.ttk, self.root, self.form = tkinter, ttk, root, form
@@ -93,12 +103,7 @@ class SettingsWindow:
 
     def run(self):
         """Bring the window to the front, wait until it closes and return the exit code."""
-        if sys.platform == "darwin":
-            show_in_dock_as_elitea()
-        self.root.lift()
-        self.root.attributes("-topmost", True)
-        self.root.after(300, lambda: self.root.attributes("-topmost", False))
-        self.root.focus_force()
+        bring_to_front(self.root)
         self.root.mainloop()
         return self.exit_code
 

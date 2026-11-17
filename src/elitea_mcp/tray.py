@@ -45,9 +45,10 @@ from .utils.server_registry import DECLINED, FAILED, HEALTHY, REGISTERED
 from .tray_platforms import get_tray_platform
 from .main import main, find_default_log_file, get_default_paths, read_config_leniently
 from .settings_form import SettingsExit, describe_tk_install
+from .about_window import describe_about
 from .utils.logging_setup import (DAEMON, DEBUG, INFO, OWNER_ONLY_FILE_MODE, TRAY, apply_debug_logging, get_log_secrets,
                                   is_debug_logging, register_log_secrets, restrict_to_owner, setup_logging)
-from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS, UpdateChecker, get_installed_version
+from .utils.package_updates import DEFAULT_CHECK_INTERVAL_HOURS, UpdateChecker
 from .utils.self_update import consume_update_result, resolve_upgrade_plan, start_update_helper
 
 APP_NAME = "ELITEA MCP Client"
@@ -131,6 +132,7 @@ class MCPTrayApp:
         self.settings = None
         self.help_action = None
         self.settings_running = False
+        self.about_running = False
         self.has_duplicate_keys = False
         self._raw_config = None
         self._restart_announced = False
@@ -870,24 +872,27 @@ class MCPTrayApp:
             self.show_error("Configuration Error", f"Failed to load configuration: {str(e)}")
 
     def show_about(self, icon=None, item=None):
-        """Show about information via notification."""
+        """Open the About window in its own process and return at once, since a notification can be hidden by the system's notification settings."""
+        if self.about_running:
+            self.show_notification("About", f"About is already open; find it {self.platform.open_window_hint}.")
+            return
+        self.about_running = True
+        threading.Thread(target=self.run_about_window, name="about", daemon=True).start()
+
+    def run_about_window(self):
+        """Wait for the window on a daemon thread, so Quit never waits for it; when no window could open, About falls back to a notification."""
         try:
-            version = get_installed_version() or "unknown (development checkout)"
-            
-            # Create about message
-            title = "ELITEA MCP Client"
-            message = f"Version: {version}\n\nModel Context Protocol client for the ELITEA platform.\n\nProvides MCP server management and configuration."
-            
-            # Show notification
-            self.show_notification(title, message)
-            
-            # Also log for debugging
-            logger.info(f"About dialog shown - {title} v{version}")
-            
-        except Exception as e:
-            logger.error(f"Error showing about dialog: {e}")
-            # Fallback notification
-            self.show_notification("ELITEA MCP Client", "MCP client for ELITEA platform")
+            process = subprocess.run(build_about_command(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, **self.platform.child_process_options())
+            output = process.stdout.decode("utf-8", "replace")
+            exit_code = process.returncode
+        except OSError as error:
+            output, exit_code = str(error), None
+        finally:
+            self.about_running = False
+        if exit_code != SettingsExit.CANCELLED:
+            logger.warning(f"The About window did not open (exit code {exit_code}): {output.strip()}")
+            self.show_notification("ELITEA MCP Client", "\n".join(describe_about()))
 
     def show_error(self, title, message):
         """Log the whole error; the notification is cut to fit, because Windows refuses balloon text over 256 characters."""
@@ -1016,6 +1021,11 @@ def save_log_level(level):
         return changed
 
     update_config(set_level, "Debug logging")
+
+
+def build_about_command():
+    """The About window as a separate process of this same Python, which -P keeps from importing anything in the working folder; --from-tray asks for the window's own exit code, so the tray knows when to fall back to a notification."""
+    return [sys.executable, "-P", "-m", "elitea_mcp.main", "about", "--from-tray"]
 
 
 def build_settings_command():

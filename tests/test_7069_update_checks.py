@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
+from src.elitea_mcp import about_window
 from src.elitea_mcp import config as config_module
 from src.elitea_mcp import tray as tray_module
 from src.elitea_mcp.utils import package_updates
@@ -180,11 +181,7 @@ def test_disabled_update_check_hides_update_items():
 
 
 def test_about_shows_the_installed_version():
-    app, _ = build_tray()
-    app.show_notification = MagicMock()
-    with patch.object(tray_module, "get_installed_version", return_value="0.1.36"):
-        app.show_about()
-    assert "Version: 0.1.36" in app.show_notification.call_args.args[1]
-    with patch.object(tray_module, "get_installed_version", return_value=None):
-        app.show_about()
-    assert "0.1.16" not in app.show_notification.call_args.args[1]
+    with patch.object(about_window, "get_installed_version", return_value="0.1.36"):
+        assert "Version: 0.1.36" in about_window.describe_about()
+    with patch.object(about_window, "get_installed_version", return_value=None):
+        assert not any("0.1.16" in line for line in about_window.describe_about())

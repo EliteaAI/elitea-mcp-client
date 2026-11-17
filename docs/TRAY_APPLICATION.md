@@ -50,7 +50,7 @@ Right-click on the tray icon to access:
   - **Open Config Folder**: Open the configuration directory in your file manager
   - **Settings…**: Set the deployment URL, token and project ID in a window, with Test connection
   - **View Current Config**: Display current configuration in the console
-- **About**: Show application information in the console
+- **About**: Open a window with the version and licence
 - **Quit**: Exit the tray application
 
 ### Configuration Management

@@ -28,8 +28,9 @@ from .utils.logging_setup import (CLI, DAEMON, OWNER_ONLY_FILE_MODE, OWNER_ONLY_
                                   build_daemon_output_path, install_crash_hooks, register_log_secrets,
                                   report_unwritable_log, restrict_to_owner, setup_logging)
 from .utils.preflight import PreflightError, validate_platform_config
-from .utils.server_loader import redact_urls
+from .utils.secret_masking import redact_urls
 from .utils.single_instance import Holder, describe_holder, find_holder
+from .utils.support_bundle import SAVED_MESSAGE, LogFiles, build_support_bundle
 
 
 logger = logging.getLogger(__name__)
@@ -273,11 +274,11 @@ def daemonize(pid_file=None, log_file=None):
     
     return True
 
-def get_default_paths():
-    """Get default paths for PID and log files based on the platform."""
+def get_default_paths(create=True):
+    """Get default paths for PID and log files based on the platform; create=False only names them, for commands that must run when they cannot be created."""
     from pathlib import Path
     import tempfile
-    
+
     if os.name == 'posix':
         # Unix systems
         if os.getuid() == 0:  # Root user
@@ -287,12 +288,13 @@ def get_default_paths():
             home = Path.home()
             pid_dir = home / '.local' / 'var' / 'run' / 'elitea-mcp'
             log_dir = home / '.local' / 'var' / 'log' / 'elitea-mcp'
-        
+
         # Create directories if they don't exist
-        pid_dir.mkdir(parents=True, exist_ok=True)
-        log_dir.mkdir(parents=True, exist_ok=True)
-        if log_dir.stat().st_uid == os.getuid():
-            restrict_to_owner(log_dir, OWNER_ONLY_FOLDER_MODE)
+        if create:
+            pid_dir.mkdir(parents=True, exist_ok=True)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            if log_dir.stat().st_uid == os.getuid():
+                restrict_to_owner(log_dir, OWNER_ONLY_FOLDER_MODE)
         
         return {
             'serve_pid': pid_dir / 'elitea-mcp-serve.pid',
@@ -307,7 +309,8 @@ def get_default_paths():
     else:
         # Windows - use temp directory
         temp_dir = Path(tempfile.gettempdir()) / 'elitea-mcp'
-        temp_dir.mkdir(exist_ok=True)
+        if create:
+            temp_dir.mkdir(exist_ok=True)
         return {
             'serve_pid': temp_dir / 'elitea-mcp-serve.pid',
             'tray_pid': temp_dir / 'elitea-mcp-tray.pid', 
@@ -362,17 +365,42 @@ def validate(config_file=None):
     print(f"Config file is valid: {config_file}")
 
 
-def doctor(config_file=None):
-    """Check the whole local setup and print one line per check as each group finishes; exit 1 when any check fails."""
+def prepare_doctor_output():
+    """Keep log warnings out of the report and print its marks even when the output is redirected on a legacy code page."""
     logging.getLogger().setLevel(logging.ERROR)
     if not sys.stdout.isatty():
         sys.stdout.reconfigure(encoding="utf-8")
+
+
+def print_doctor_group(group):
+    print(format_results(group), flush=True)
+
+
+def doctor(config_file=None):
+    """Check the whole local setup and print one line per check as each group finishes; exit 1 when any check fails."""
+    prepare_doctor_output()
     config_file = Path(config_file).resolve() if config_file else get_config_file()
-    context = DoctorContext(config_file, get_default_paths()["tray_log"].parent)
+    context = DoctorContext(config_file, get_default_paths(create=False)["tray_log"].parent)
     print(REPORT_TITLE, flush=True)
-    results = run_checks(context, lambda group: print(format_results(group), flush=True))
+    results = run_checks(context, print_doctor_group)
     print(f"\n{summarize(results)}")
     sys.exit(exit_code(results))
+
+
+def support_bundle(output=None, config_file=None):
+    """Print the doctor report as it runs, then save the masked bundle; exit 1 only when the zip cannot be written."""
+    prepare_doctor_output()
+    config_file = Path(config_file).resolve() if config_file else get_config_file()
+    paths = get_default_paths(create=False)
+    context = DoctorContext(config_file, paths["tray_log"].parent)
+    print(REPORT_TITLE, flush=True)
+    try:
+        path = build_support_bundle(context, output or Path.cwd(), LogFiles.from_default_paths(paths),
+                                    on_doctor_results=print_doctor_group)
+    except OSError as error:
+        print(f"Could not write the support bundle: {error}", file=sys.stderr)
+        sys.exit(1)
+    print(f"\n{SAVED_MESSAGE.format(path)}")
 
 
 def choose_daemon_pid_file(args, default):
@@ -451,13 +479,19 @@ def run_cli():
 
     doctor_parser = subparsers.add_parser("doctor", help="Check the whole local setup (client, config, platform, local servers) and print one line per check; exits non-zero when any check fails")
     doctor_parser.add_argument('--config', type=str, help='Config file to check (defaults to the client config file)')
-    
+
+    bundle_parser = subparsers.add_parser("support-bundle", help="Save a zip to attach to a bug report: the doctor report, the config with every secret masked, the last part of the logs and the versions")
+    bundle_parser.add_argument('--output', type=str, help='Folder or .zip file to write (defaults to the current folder)')
+    bundle_parser.add_argument('--config', type=str, help='Config file to include (defaults to the client config file)')
+
     args = parser.parse_args()
-    
+
     if args.command == "validate":
         validate(args.config)
     elif args.command == "doctor":
         doctor(args.config)
+    elif args.command == "support-bundle":
+        support_bundle(args.output, args.config)
     elif args.command == "settings":
         install_crash_hooks()
         exit_code = run_settings_window()

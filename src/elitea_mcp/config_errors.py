@@ -129,8 +129,27 @@ def locate_json_mistake(error):
 
 def redact_values(text):
     """Star out every value whose key the client does not know to be harmless, so an unknown secret fails closed; positions never move."""
-    tokens = [token for token in JSON_TOKEN.finditer(text) if not token.group().isspace()]
     redacted = list(text)
+    for _, token in find_hidden_values(text):
+        mask_token(redacted, token)
+    return "".join(redacted)
+
+
+def list_hidden_values(text):
+    """The values redact_values stars out, unquoted, with the key each belongs to: the secrets of a file that cannot be parsed, so they can be masked elsewhere."""
+    return [(owner, unquote_token(token.group())) for owner, token in find_hidden_values(text)]
+
+
+def unquote_token(value):
+    try:
+        return json.loads(value) if value.startswith('"') else value.strip("'")
+    except ValueError:
+        return value.strip("\"'")
+
+
+def find_hidden_values(text):
+    """Every value token whose key the client does not know to be harmless, read token by token so a broken file still yields them."""
+    tokens = [token for token in JSON_TOKEN.finditer(text) if not token.group().isspace()]
     owners = []
     key = None
     for index, token in enumerate(tokens):
@@ -152,9 +171,8 @@ def redact_values(text):
             key = value.strip("\"'")
         else:
             if owner not in VISIBLE_VALUE_KEYS:
-                mask_token(redacted, token)
+                yield owner, token
             key = None
-    return "".join(redacted)
 
 
 def mask_token(characters, token):

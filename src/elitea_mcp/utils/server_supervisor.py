@@ -6,7 +6,8 @@ import threading
 
 from ..config_model import DEFAULT_STARTUP_TIMEOUT, SKIPPED
 from .name import sanitize
-from .server_loader import collect_secret_values, load_servers, mask_secrets, read_transport
+from .secret_masking import collect_secret_values, mask_secrets
+from .server_loader import load_servers, read_transport
 from .server_registry import FAILED, HEALTHY, ServerRegistry
 from .session_status import SessionStatusPublisher
 from .sio import start_socket_connection

@@ -7,7 +7,7 @@ import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from .server_loader import collect_secret_values, mask_secrets
+from .secret_masking import collect_config_secrets, mask_secrets
 from .server_output import SERVER_OUTPUT_LOGGER_NAME
 
 CLI = "cli"
@@ -42,18 +42,13 @@ _secrets = ()
 def register_log_secrets(config):
     """Mask every value a config could leak, keeping earlier ones because records about them may still be written."""
     global _secrets
-    values = set(_secrets)
-    values.update(collect_secret_values(config, {}))
-    servers = config.get("servers")
-    for server_conf in servers.values() if isinstance(servers, dict) else ():
-        if isinstance(server_conf, dict):
-            values.update(collect_secret_values(config, keep_object_settings(server_conf)))
-    _secrets = tuple(sorted(values, key=len, reverse=True))
+    known = set(_secrets) | collect_config_secrets(config)
+    _secrets = tuple(sorted(known, key=len, reverse=True))
 
 
-def keep_object_settings(server_conf):
-    """The env and headers of a server only when they are objects: the config check skips a server whose are not, so it never runs."""
-    return {key: server_conf[key] for key in ("env", "headers") if isinstance(server_conf.get(key), dict)}
+def get_log_secrets():
+    """Every secret this process has masked so far, including ones a rotation has since removed from the config."""
+    return _secrets
 
 
 def forget_log_secrets():

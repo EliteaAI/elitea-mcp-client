@@ -4,12 +4,10 @@ import email.utils
 import json
 import math
 import os
-import re
 import shutil
 import sys
 import tempfile
 import time
-import urllib.parse
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import Optional
@@ -22,6 +20,7 @@ from mcp.client.stdio import get_default_environment, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
 from ..config_model import DEFAULT_STARTUP_TIMEOUT, DEFAULT_TIMEOUT
+from .secret_masking import mask_url_secrets
 from .server_output import forward_server_output
 
 COMMAND_NOT_FOUND = "command_not_found"
@@ -33,15 +32,6 @@ INVALID_CONFIG = "invalid_config"
 REMOTE_TRANSPORTS = ("http", "sse")
 STDERR_TAIL_LINES = 20
 STDERR_TAIL_BYTES = 64 * 1024
-MASK = "****"
-MIN_SECRET_LENGTH = 4
-PLAIN_SETTING_PATTERN = re.compile(r"\d{1,5}|true|false", re.IGNORECASE)
-CREDENTIAL_NAME_PARTS = ("PASS", "SECRET", "TOKEN", "KEY", "PIN", "AUTH")
-URL_PATTERN = re.compile(r"https?://\S+")
-URL_WITH_HOST_PATTERN = re.compile(r"https?://[^\s/?#]\S*")
-URL_HOST_PATTERN = re.compile(r"(https?://)(?:[^\s/@?#]*@)?([^\s/?#]+)")
-URL_USERINFO_PATTERN = re.compile(r"(?<![\w+.-])([a-zA-Z][\w+.-]*://)[^\s/?#]*@")
-URL_TRAILING_PUNCTUATION = ".,:;)\"'"
 AUTH_STATUS_CODES = (401, 403)
 SLOW_DOWN_STATUS_CODES = (429, 503)
 ON_WINDOWS = os.name == "nt"
@@ -314,106 +304,3 @@ def read_stderr_tail(errlog, lines=STDERR_TAIL_LINES):
         return []
     kept = [line for line in text.splitlines() if line.strip()]
     return kept if lines is None else kept[-lines:]
-
-
-def collect_secret_values(config, server_conf):
-    """The configured values a server's output may echo, in every form a log line may carry them: the platform token, env values and header values."""
-    env_values = (value for name, value in (server_conf.get("env") or {}).items() if not is_plain_setting(name, value))
-    values = [config.get("auth_token"), *env_values, *(server_conf.get("headers") or {}).values()]
-    secrets = set()
-    for value in values:
-        if not isinstance(value, str):
-            continue
-        secrets.update(list_secret_forms(value))
-        scheme, _, credential = value.partition(" ")
-        if credential and scheme.lower() in ("bearer", "basic", "token"):
-            secrets.update(list_secret_forms(credential))
-    return sorted((secret for secret in secrets if len(secret) >= MIN_SECRET_LENGTH), key=len, reverse=True)
-
-
-def is_plain_setting(name, value):
-    """A port, a count or a flag under a name that does not suggest a credential, which masking would garble in every number it appears in."""
-    return (isinstance(value, str) and PLAIN_SETTING_PATTERN.fullmatch(value.strip()) is not None
-            and not any(part in str(name).upper() for part in CREDENTIAL_NAME_PARTS))
-
-
-def list_secret_forms(value):
-    """A value as written, escaped in JSON or a repr, URL-encoded, line by line, and as URL masking leaves a value that is itself a URL."""
-    return {value, value.strip(), json.dumps(value)[1:-1], repr(value)[1:-1], urllib.parse.quote(value, safe=""),
-            urllib.parse.quote_plus(value), mask_url_secrets(value), *(line.strip() for line in value.splitlines())}
-
-
-def mask_secrets(lines, secrets):
-    """Replace the values before masking the URLs, so URL masking cannot cut a value apart, except a value that overlaps a URL scheme, such as "https", as replacing it would hide that URL from masking."""
-    masked = []
-    for line in lines:
-        schemes = find_scheme_spans(line)
-        replaced_first = [secret for secret in secrets if secret in line and not overlaps_a_span(line, secret, schemes)]
-        for secret in replaced_first:
-            line = line.replace(secret, MASK)
-        line = mask_url_secrets(line)
-        for secret in secrets:
-            line = line.replace(secret, MASK)
-        masked.append(line)
-    return masked
-
-
-def find_scheme_spans(line):
-    """The start and end of every scheme with its "://", such as "postgresql://", walking back by hand to stay linear on any input."""
-    spans = []
-    separator = line.find("://")
-    while separator != -1:
-        start = separator
-        while start and (line[start - 1].isalnum() or line[start - 1] in "_+.-"):
-            start -= 1
-        spans.append((start, separator + 3))
-        separator = line.find("://", separator + 3)
-    return spans
-
-
-def overlaps_a_span(line, secret, spans):
-    return any(secret in line[max(start - len(secret) + 1, 0):end + len(secret) - 1] for start, end in spans)
-
-
-def redact_urls(text):
-    """Keep only the scheme and host of every URL, because hosted MCP servers often carry a secret in the path or query."""
-    return drop_url_userinfo(replace_urls(text, reduce_url_to_host, URL_WITH_HOST_PATTERN))
-
-
-def mask_url_secrets(text):
-    """For text shown on this machine: drop a URL's user and password and mask every query and fragment value."""
-    return drop_url_userinfo(replace_urls(text, mask_url))
-
-
-def drop_url_userinfo(text):
-    """Remove user:password@ from a URL of any scheme, such as a postgresql:// connection string a server prints, up to the last @ before the host as a password may hold one."""
-    return URL_USERINFO_PATTERN.sub(r"\1", text)
-
-
-def replace_urls(text, rewrite, pattern=URL_PATTERN):
-    """Match each URL greedily and give back its trailing punctuation, which keeps the match linear on any input."""
-    def rewrite_keeping_trailing_punctuation(match):
-        url = match.group(0)
-        start = url.index("://") + 3
-        kept = url[:start] + (url[start:].rstrip(URL_TRAILING_PUNCTUATION) or url[start])
-        return rewrite(kept) + url[len(kept):]
-    return pattern.sub(rewrite_keeping_trailing_punctuation, text)
-
-
-def reduce_url_to_host(url):
-    match = URL_HOST_PATTERN.match(url)
-    return f"{match.group(1)}{match.group(2).rpartition('@')[2]}" if match else url
-
-
-def mask_url(url):
-    try:
-        parts = urllib.parse.urlsplit(url)
-    except ValueError:
-        return reduce_url_to_host(url)
-    return urllib.parse.urlunsplit((parts.scheme, parts.netloc.rpartition("@")[2], parts.path,
-                                    mask_parameters(parts.query), mask_parameters(parts.fragment)))
-
-
-def mask_parameters(text):
-    pairs = (part.partition("=") for part in text.split("&") if part)
-    return "&".join(f"{key}={MASK}" if separator else MASK for key, separator, _ in pairs)

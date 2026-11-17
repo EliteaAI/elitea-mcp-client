@@ -1,6 +1,7 @@
 """`elitea-mcp doctor` and tray Help → Run Diagnostics (#7074)."""
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -359,6 +360,9 @@ def test_secrets_never_reach_the_report_and_the_server_output_goes_to_its_detail
     text = details.read_text()
     assert "boom **** ****" in text
     assert not [secret for secret in SECRETS if secret in text]
+    if os.name != "nt":
+        assert stat.S_IMODE(details.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(details.stat().st_mode) == 0o600
 
 
 def test_a_launcher_timeout_says_the_first_run_may_still_be_downloading():
@@ -710,7 +714,7 @@ def find_help_item(app):
 def test_run_diagnostics_saves_opens_and_copies_the_report_off_the_menu_thread(app, tmp_path):
     results = [ok("Config JSON valid"), fail("Token", "invalid")]
     finished = threading.Event()
-    app.update_menu = MagicMock(side_effect=lambda: finished.set() if not app.diagnostics_running else None)
+    app.update_menu = MagicMock(side_effect=lambda: finished.set() if app.help_action is None else None)
     with patch.object(tray_module, "run_checks", return_value=results) as run, \
             patch.object(tray_module, "get_default_paths", return_value={"tray_log": tmp_path / "tray.log"}):
         find_help_item(app)(MagicMock())
@@ -725,7 +729,7 @@ def test_run_diagnostics_saves_opens_and_copies_the_report_off_the_menu_thread(a
 
 
 def test_the_menu_item_is_disabled_while_diagnostics_run(app):
-    app.diagnostics_running = True
+    app.help_action = tray_module.DIAGNOSTICS
 
     item = find_help_item(app)
 

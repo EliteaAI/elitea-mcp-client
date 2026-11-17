@@ -11,8 +11,8 @@ import pytest
 
 from src.elitea_mcp.config_model import check_config
 from src.elitea_mcp.utils import server_loader
-from src.elitea_mcp.utils.server_loader import (AUTH, COMMAND_NOT_FOUND, EXITED, TIMEOUT, UNREACHABLE,
-                                                collect_secret_values, load_servers, mask_secrets, mask_url_secrets)
+from src.elitea_mcp.utils.secret_masking import collect_secret_values, mask_secrets, mask_url_secrets
+from src.elitea_mcp.utils.server_loader import AUTH, COMMAND_NOT_FOUND, EXITED, TIMEOUT, UNREACHABLE, load_servers
 from src.elitea_mcp.utils.server_registry import ServerRegistry
 from src.elitea_mcp.utils.server_supervisor import ServerSupervisor
 from tests import fixtures_7076 as fixtures

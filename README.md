@@ -205,6 +205,7 @@ Right-click the tray icon to access:
 
 #### Help
 - **Run Diagnostics** - Run every `elitea-mcp doctor` check, open the report and copy it to the clipboard
+- **Export Support Bundle** - Save a zip to attach to a bug report next to the logs and open its folder (see [Support bundle](#support-bundle))
 
 #### Log files
 The logs are in `~/.local/var/log/elitea-mcp/` on macOS and Linux (`/var/log/elitea-mcp/` when run as root) and in `%TEMP%\elitea-mcp\` on Windows. The default folder and every log file can be read only by you.
@@ -216,7 +217,7 @@ The logs are in `~/.local/var/log/elitea-mcp/` on macOS and Linux (`/var/log/eli
 | `elitea-mcp-serve.log`, `elitea-mcp-serve-servers.log` | `elitea-mcp serve`, also in the foreground |
 | `elitea-mcp-tray.out`, `elitea-mcp-serve.out` | a daemon's crash output and anything written outside the log |
 
-Each log keeps 5 MB per file (5 old files for the main log, 3 for server output). Every tool call writes one line with the server, the tool, the result (`ok`, `tool_error`, `start_failed`, `failed`, `server_failed`, `not_running`) and the time it took. Configured secrets (`auth_token`, every `env` and `headers` value of 4 characters or more, also JSON-escaped, URL-encoded or line by line) and every URL query value and user name and password are replaced by `****` in every log line. An `env` value that is a number of up to 5 digits or `true`/`false` is left visible, so `PORT=3000` does not hide every 3000 in the logs, unless its name contains `PASS`, `SECRET`, `TOKEN`, `KEY`, `PIN` or `AUTH`. A short word such as `jira` is still hidden wherever it appears. Tool arguments, tool results and agent conversations are never logged, not even with debug logging on; debug adds only argument names and sizes. `elitea-mcp run` writes no log file: its messages go to the error output, which your IDE keeps in its MCP log. `"log_level": "debug"` in `config.json`, or `ELITEA_MCP_DEBUG=1`, turns on debug logging for `run` too.
+Each log keeps 5 MB per file (5 old files for the main log, 3 for server output). Every tool call writes one line with the server, the tool, the result (`ok`, `tool_error`, `start_failed`, `failed`, `server_failed`, `not_running`) and the time it took. Configured secrets (`auth_token`, every `env` and `headers` value of 4 characters or more, also JSON-escaped, URL-encoded or line by line) and every URL query value and user name and password are replaced by `****` in every log line. An `env` value that is a number of up to 5 digits or `true`/`false` is left visible, so `PORT=3000` does not hide every 3000 in the logs, unless its name contains `PASS`, `SECRET`, `TOKEN`, `KEY`, `PIN`, `AUTH`, `CRED` or `BEARER`. A short word such as `jira` is still hidden wherever it appears. Tool arguments, tool results and agent conversations are never logged, not even with debug logging on; debug adds only argument names and sizes. `elitea-mcp run` writes no log file: its messages go to the error output, which your IDE keeps in its MCP log. `"log_level": "debug"` in `config.json`, or `ELITEA_MCP_DEBUG=1`, turns on debug logging for `run` too.
 
 #### Servers
 Shown after the first start, with one row per configured server:
@@ -282,6 +283,7 @@ elitea-mcp serve                     # Start MCP servers in background
 elitea-mcp tray                      # Launch system tray application
 elitea-mcp validate                  # List every problem in the config file; exit 1 when any is an error, 0 otherwise; --config <path> checks another file
 elitea-mcp doctor                    # Check the whole local setup, one line per check; exit 1 when any check fails; --config <path> checks another file
+elitea-mcp support-bundle            # Save a zip for a bug report in the current folder; --output <folder or .zip>, --config <path>
 elitea-mcp --version                 # Print the installed version
 ```
 
@@ -579,6 +581,23 @@ ELITEA MCP doctor
 - The report never contains the token, header or `env` values, or a server's own output, and shows every URL as scheme and host only, since hosted MCP servers often carry a key in the URL path. When a failed server wrote output, its line ends with `Details: <file>`, the same masked `<server>-error.txt` the tray's **Servers** menu opens.
 - The tray saves the report as `elitea-mcp-diagnostics.txt` next to the tray log, opens it and copies it to the clipboard, ready to paste into a support request.
 - While a tray or `serve` runs servers, it writes their status to `status.json` in the config folder (owner-only) and removes it when the servers stop, so the doctor can show the running session; a session that stops updating it for 60 s is reported as possibly frozen. The Instance line names the tray or `serve` that holds `client_id.lock`, so a frozen one can be told apart from none; it reads "unknown" when the lock cannot be used.
+
+### Support bundle
+
+`elitea-mcp support-bundle`, or **Help → Export Support Bundle** in the tray, saves one zip with everything needed to look into a problem:
+
+| File | Content |
+|---|---|
+| `doctor.txt` | A fresh `elitea-mcp doctor` run (it starts every server once more, as Run Diagnostics does) |
+| `config.masked.json` | `config.json` rebuilt from the settings this client reads, with every secret replaced by `****` (`config.error.txt` with the reason when the file cannot be read) |
+| `logs/` | The newest part of the tray and serve logs, their server output, daemon output, the update log and the `<server>-error.txt` reports, at most about 8 MB, with `logs/README.txt` listing what was kept |
+| `versions.txt` | elitea-mcp, the install method, Python, the OS and the `mcp`, `python-socketio`, `pystray`, `pydantic` and `httpx` versions |
+
+- The CLI writes to the current folder (`--output` takes a folder or a `.zip` path) and prints the doctor lines as they finish. The tray writes next to the logs and opens that folder. The zip can be read only by you.
+- What is masked in every file: the token, every `headers` and `env` value (except a number of up to 5 digits or `true`/`false` under a name that does not suggest a credential), any setting this client does not know, every URL down to its scheme and host, and the home folder (shown as `~`).
+- In `args`, flag names, small numbers, `true`/`false`, the package or image after a launcher (`npx`, `uvx`, `docker run`, also through `cmd /c`), URL hosts and paths that exist are kept; every other value is `****`.
+- In the logs, values that look like credentials are masked too, even when the current config no longer has them: `Authorization` headers, `Bearer`/`Basic` values, `token=`, `password`, `api_key` and similar settings, JWTs, private keys, and keys with a known prefix (`sk-`, `ghp_`, `glpat-`, `xoxb-`, `AKIA`…).
+- A secret that has no known prefix, no telling name around it and is not in the config can still appear in an old log, so look through the zip before you attach it.
 
 #### macOS: "Fork Safety" Errors
 If you encounter fork safety errors on macOS, they have been automatically resolved in version 0.1.10+. The client now uses fork-safe daemon mode for GUI applications.

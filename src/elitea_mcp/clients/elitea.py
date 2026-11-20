@@ -66,7 +66,7 @@ class Agents():
         if response.status_code == 404:
             return None
         if response.status_code != 200:
-            raise ApiDetailsRequestError(f"Failed to fetch agent details: {_describe_failure(response)}")
+            raise ApiDetailsRequestError(f"Failed to read the agent versions exposed over MCP: {_describe_failure(response)}")
         rows = response.json().get("rows", [])
         if any("tool_name" not in row for row in rows):
             return None

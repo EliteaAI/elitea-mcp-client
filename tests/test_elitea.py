@@ -707,5 +707,5 @@ class TestAgents:
         agents.project_id = 123
         agents.headers = {"Authorization": "Bearer test_token"}
         
-        with pytest.raises(ApiDetailsRequestError, match="Failed to fetch agent details"):
+        with pytest.raises(ApiDetailsRequestError, match="Failed to read the agent versions exposed over MCP"):
             agents._get_list_of_apps()

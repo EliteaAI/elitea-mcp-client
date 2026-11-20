@@ -122,7 +122,7 @@ def test_a_platform_that_does_not_report_exposed_versions_gets_the_newest_versio
 
 def test_a_failing_exposed_versions_request_is_a_readable_error(monkeypatch):
     platform = Platform(monkeypatch, Response(503, {"error": "the versions could not be read"}))
-    with pytest.raises(ApiDetailsRequestError, match="HTTP 503: the versions could not be read"):
+    with pytest.raises(ApiDetailsRequestError, match="^Failed to read the agent versions exposed over MCP: HTTP 503: the versions could not be read"):
         platform.agents()
 
 

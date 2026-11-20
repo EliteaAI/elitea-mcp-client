@@ -70,6 +70,7 @@ def mock_agents_response():
     
     return {
         "tag_response": tag_response,
+        "unreported_response": MockResponse(404, {}, ""),
         "apps_response": apps_response,
         "version_response": version_response
     }
@@ -392,6 +393,7 @@ class TestAgents:
         # Set up side effects for requests.get calls to handle all potential calls
         mock_get.side_effect = [
             mock_agents_response["tag_response"],       # For _mcp_tag_id
+            mock_agents_response["unreported_response"],  # For _exposed_versions (an older platform)
             mock_agents_response["apps_response"],      # For _get_list_of_apps
             mock_agents_response["version_response"],   # For _get_app_version_id (first app)
             mock_agents_response["version_response"]    # For _get_app_version_id (second app)
@@ -432,6 +434,7 @@ class TestAgents:
         # Set up side effects for requests.get calls
         mock_get.side_effect = [
             mock_agents_response["tag_response"],
+            mock_agents_response["unreported_response"],
             mock_agents_response["apps_response"],
             mock_agents_response["version_response"],
             mock_agents_response["version_response"]
@@ -473,6 +476,7 @@ class TestAgents:
         # 3-4. _get_app_version_id calls (one for each app in the list)
         mock_get.side_effect = [
             mock_agents_response["tag_response"],       # For _mcp_tag_id
+            mock_agents_response["unreported_response"],  # For _exposed_versions (an older platform)
             mock_agents_response["apps_response"],      # For _get_list_of_apps
             mock_agents_response["version_response"],   # For _get_app_version_id (first app)
             mock_agents_response["version_response"]    # For _get_app_version_id (second app)
@@ -657,6 +661,7 @@ class TestAgents:
         agents.auth_token = "test_token"
         agents.api_extra_headers = None
         agents.apps_list_url = "http://example.com/api/v2/elitea_core/applications/prompt_lib/"
+        agents.exposed_versions_url = "http://example.com/api/v2/elitea_core/mcp_exposed_versions/prompt_lib/"
         agents.headers = {"Authorization": "Bearer test_token"}
         agents.agents = []
         
@@ -698,8 +703,9 @@ class TestAgents:
         
         agents = Agents.__new__(Agents)
         agents.apps_list_url = "http://example.com/api/v2/elitea_core/applications/prompt_lib/"
+        agents.exposed_versions_url = "http://example.com/api/v2/elitea_core/mcp_exposed_versions/prompt_lib/"
         agents.project_id = 123
         agents.headers = {"Authorization": "Bearer test_token"}
         
-        with pytest.raises(ApiDetailsRequestError, match="Failed to fetch agent details"):
+        with pytest.raises(ApiDetailsRequestError, match="Failed to read the agent versions exposed over MCP"):
             agents._get_list_of_apps()

@@ -8,6 +8,7 @@ import mcp.types as types
 def mock_agent():
     agent = MagicMock()
     agent.agent_name = "TestAgent"
+    agent.tool_name = "TestAgent"
     agent.description = "Test Description"
     agent.pydantic_model.schema.return_value = {"title": "TestSchema"}
     return agent

@@ -3,6 +3,9 @@ import requests
 from pydantic import create_model, Field
 from typing import Dict, List, Any, Optional
 import urllib3
+
+from ..utils.name import build_agent_identifier
+
 urllib3.disable_warnings()
 
 logger = logging.getLogger(__name__)
@@ -42,6 +45,7 @@ class Agents():
         self.get_tags = f"{self.base_url}{self.api_path}/elitea_core/tags/prompt_lib/"
         self.apps_list_url = f"{self.base_url}{self.api_path}/elitea_core/applications/prompt_lib/"
         self.app_versions_list = f"{self.base_url}{self.api_path}/elitea_core/versions/prompt_lib/"
+        self.exposed_versions_url = f"{self.base_url}{self.api_path}/elitea_core/mcp_exposed_versions/prompt_lib/"
         self.agents = []
         self._get_list_of_apps()
 
@@ -56,6 +60,18 @@ class Agents():
         else:
             return None
     
+    def _exposed_versions(self) -> Optional[List[Dict[str, Any]]]:
+        """The agent versions the platform exposes over MCP, each with its tool name; None from a platform that does not report them yet."""
+        response = requests.get(f"{self.exposed_versions_url}{self.project_id}", headers=self.headers, verify=False)
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise ApiDetailsRequestError(f"Failed to fetch agent details: {_describe_failure(response)}")
+        rows = response.json().get("rows", [])
+        if any("tool_name" not in row for row in rows):
+            return None
+        return rows
+
     def _get_app_version_id(self, app_id: str) -> List[str]:
         url = f"{self.app_versions_list}{self.project_id}/{app_id}"
         response = requests.get(url, headers=self.headers, verify=False)
@@ -73,26 +89,40 @@ class Agents():
         else:
             raise ApiDetailsRequestError(f"Failed to fetch agent details: application {app_id} has no versions in project {self.project_id}")
         
-    def _get_list_of_apps(self) -> List[Dict[str, Any]]:
-        tag_id = self._mcp_tag_id()
-        if not tag_id:
-            raise ApiDetailsRequestError(
-                f'No agents tagged "mcp" in project {self.project_id}. Add the "mcp" tag to the agents you want to expose.'
-            )
+    def _newest_versions_of_tagged_agents(self, tag_id) -> List[Dict[str, Any]]:
         url = f"{self.apps_list_url}{self.project_id}?limit=100&tags={tag_id}&pipeline_only=0"
         response = requests.get(url, headers=self.headers, verify=False)
         if response.status_code != 200:
             raise ApiDetailsRequestError(f"Failed to fetch agent details: {_describe_failure(response)}")
-        logger.debug(f"Agents listed: {len(response.json().get('rows', []))}")
-        for app in response.json().get("rows", []):
-            app_version =self._get_app_version_id(app.get("id"))
+        return [
+            {"application_id": app.get("id"), "version_id": self._get_app_version_id(app.get("id"))}
+            for app in response.json().get("rows", [])
+        ]
+
+    def _get_list_of_apps(self) -> List[Dict[str, Any]]:
+        tag_id = self._mcp_tag_id()
+        if not tag_id:
+            raise ApiDetailsRequestError(
+                f'No agents tagged "mcp" in project {self.project_id}. Add the "mcp" tag to the agent versions you want to expose.'
+            )
+        exposed = self._exposed_versions()
+        if exposed is None:
+            logger.warning(
+                'This platform does not report which agent versions are tagged "mcp"; '
+                "serving the newest version of each tagged agent."
+            )
+            exposed = self._newest_versions_of_tagged_agents(tag_id)
+        logger.debug(f"Agent versions listed: {len(exposed)}")
+        for row in exposed:
             self.agents.append(
                 Agent(
                     base_url=self.base_url,
                     project_id=self.project_id,
                     auth_token=self.auth_token,
-                    app_id=app.get("id"),
-                    version_id=app_version,
+                    app_id=row["application_id"],
+                    version_id=row["version_id"],
+                    tool_name=row.get("tool_name"),
+                    description=row.get("description"),
                     api_extra_headers=self.api_extra_headers
                 ))
 
@@ -104,6 +134,8 @@ class Agent():
                  app_id: int = None,
                  version_id: int = None,
                  api_extra_headers: Optional[dict] = None,
+                 tool_name: Optional[str] = None,
+                 description: Optional[str] = None,
                  **kwargs):
 
         self.base_url = base_url.rstrip('/')
@@ -124,10 +156,17 @@ class Agent():
         self.agent_name = None
         self.description = None
         self.pydantic_model = None
+        self.exposed_tool_name = tool_name
         self._get_app_details()
+        if description is not None:
+            self.description = description
         self._get_vestion_details()
         
     
+    @property
+    def tool_name(self) -> str:
+        return self.exposed_tool_name or build_agent_identifier(self.agent_name)
+
     def _create_pydantic_model(self, version_data):
         fields = {}
         for variable in version_data.get("variables", []):

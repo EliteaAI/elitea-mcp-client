@@ -17,7 +17,6 @@ from starlette.applications import Starlette
 from starlette.routing import Mount, Route
 from mcp.server.stdio import stdio_server
 
-from elitea_mcp.utils.name import build_agent_identifier
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +113,7 @@ def create_server(agent: Union[Any, List[Any]], name=None):
     available_agents = {}
     for a in agents:
         if hasattr(a, 'agent_name'):
-            identifier = build_agent_identifier(a.agent_name)
+            identifier = a.tool_name
             if identifier in available_agents:
                 logger.warning(
                     "Skipping agent with colliding name: %s -> %s",
